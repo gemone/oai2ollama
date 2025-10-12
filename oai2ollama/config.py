@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     extra_models: list[str] = Field([], description="Extra models to include in the /api/tags response", alias="models")
     debug_api_calls: bool = Field(getenv("DEBUG_API_CALLS", "false").lower() == "true", description="Enable API call debugging to show actual URLs and content")
     debug_log_response_body: bool = Field(getenv("DEBUG_LOG_RESPONSE_BODY", "true").lower() == "true", description="Whether to include response body in debug logs (can be large)")
+    thinking_enable: bool = Field(getenv("THINKING_ENABLE", "false").lower() == "true", description="Enable thinking support for AI models")
 
     @model_validator(mode="after")
     def _warn_legacy_capacities(self: Self):

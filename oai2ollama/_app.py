@@ -125,6 +125,10 @@ async def chat_completions(request: Request):
     data = await request.json()
     full_url = f"{str(env.base_url).rstrip('/')}/chat/completions"
 
+    # 处理 thinking 支持
+    if env.thinking_enable and "thinking" not in data:
+        data["thinking"] = {"type": "enabled"}
+
     if data.get("stream", False):
 
         async def stream():
