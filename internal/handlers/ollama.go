@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gemone/oai2ollama/internal/config"
@@ -121,6 +122,16 @@ func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 
 	// Parse model name to get original name for backend call
 	log.Debugf("Parsing model name: %s", request.Model)
+	if h.converter == nil {
+		log.Error("Model converter is nil")
+		return c.Status(500).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Internal server error: model converter not initialized",
+				Type:    "internal_error",
+				Code:    "internal_error",
+			},
+		})
+	}
 	modelParse, err := h.converter.ParseModelName(request.Model)
 	if err != nil {
 		log.Debugf("Model parsing failed: %v", err)
@@ -362,8 +373,15 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 		})
 	}
 
+	log.Debugf("Request body: %s", string(c.Body()))
+
 	// Parse model name to get original name for backend call
-	log.Debugf("Parsing model name for generate: %s", request.Model)
+	// log.Debugf("Request body: %s", string(c.Body())) // Removed to avoid logging sensitive information
+	if h.converter == nil {
+		return c.Status(500).JSON(models.OllamaErrorResponse{
+			Error: "Internal server error: model converter not initialized",
+		})
+	}
 	modelParse, err := h.converter.ParseModelName(request.Model)
 	if err != nil {
 		return c.Status(400).JSON(models.OllamaErrorResponse{
@@ -374,14 +392,34 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 	log.Debugf("Generate model parse result: Backend=%s, OriginalName=%s, DisplayName=%s",
 		modelParse.Backend, modelParse.OriginalName, modelParse.DisplayName)
 
+	// Validate and set prompt using helper
+	prompt, err := h.getValidatedPrompt(request.Prompt, modelParse.Backend)
+	if err != nil {
+		log.Debugf("Prompt validation failed: %v", err)
+		return c.Status(400).JSON(models.OllamaErrorResponse{
+			Error: err.Error(),
+		})
+	}
+	request.Prompt = prompt
+
 	// Use the chat handler logic with converted model name
 	chatHandlerRequest := &models.OpenAIChatCompletionRequest{
-		Model:       modelParse.OriginalName, // Use original name for backend
-		Messages:    []models.OpenAIMessage{{Role: "user", Content: request.Prompt}},
-		Stream:      request.Stream,
-		Temperature: request.Options.Temperature,
-		TopP:        request.Options.TopP,
-		MaxTokens:   request.Options.NumPredict,
+		Model:    modelParse.OriginalName, // Use original name for backend
+		Messages: []models.OpenAIMessage{{Role: "user", Content: request.Prompt}},
+		Stream:   request.Stream,
+	}
+
+	// Safely extract options if they exist
+	if request.Options != nil {
+		if request.Options.Temperature != nil {
+			chatHandlerRequest.Temperature = request.Options.Temperature
+		}
+		if request.Options.TopP != nil {
+			chatHandlerRequest.TopP = request.Options.TopP
+		}
+		if request.Options.NumPredict != nil {
+			chatHandlerRequest.MaxTokens = request.Options.NumPredict
+		}
 	}
 
 	// Get backend for this model using cache
@@ -715,4 +753,19 @@ func mustMarshalJSON(v interface{}) []byte {
 		return []byte("{}")
 	}
 	return data
+}
+
+// Helper to validate prompt and apply default if needed
+func (h *OllamaHandler) getValidatedPrompt(prompt string, backend string) (string, error) {
+	if strings.TrimSpace(prompt) != "" {
+		return prompt, nil
+	}
+	log.Warnf("Empty prompt received for backend %s, checking for default prompt", backend)
+	defaultPrompt, hasDefaultPrompt := config.GetDefaultPromptForBackend(backend)
+	if hasDefaultPrompt {
+		log.Infof("Using default prompt for backend %s: %s", backend, defaultPrompt)
+		return defaultPrompt, nil
+	}
+	log.Debugf("No default prompt configured for backend %s", backend)
+	return "", fmt.Errorf("Prompt cannot be empty and no default prompt configured for backend")
 }

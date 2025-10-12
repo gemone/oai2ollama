@@ -32,6 +32,7 @@ type BackendConfig struct {
 	Timeout      int                `mapstructure:"timeout"`
 	Priority     int                `mapstructure:"priority"`
 	ModelPrefix  *ModelPrefixConfig `mapstructure:"model_prefix"`
+	DefaultPrompt *DefaultPromptConfig `mapstructure:"default_prompt"`
 }
 
 type ModelPrefixConfig struct {
@@ -39,6 +40,11 @@ type ModelPrefixConfig struct {
 	Prefix    string `mapstructure:"prefix"`
 	Separator string `mapstructure:"separator"`
 	Override  bool   `mapstructure:"override"`
+}
+
+type DefaultPromptConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Prompt  string `mapstructure:"prompt"`
 }
 
 type ModelConfig struct {
@@ -220,4 +226,19 @@ func GetEnabledBackends() []BackendConfig {
 		}
 	}
 	return enabled
+}
+
+func GetDefaultPromptForBackend(backendName string) (string, bool) {
+	if GlobalConfig == nil {
+		return "", false
+	}
+
+	for _, backend := range GlobalConfig.Backends {
+		if backend.Name == backendName && backend.Enabled && backend.DefaultPrompt != nil {
+			if backend.DefaultPrompt.Enabled && backend.DefaultPrompt.Prompt != "" {
+				return backend.DefaultPrompt.Prompt, true
+			}
+		}
+	}
+	return "", false
 }

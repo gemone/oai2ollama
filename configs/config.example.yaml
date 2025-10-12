@@ -6,24 +6,70 @@ server:
   write_timeout: 60
 
 backends:
-  - name: "openai"
-    api_key: "sk-your-openai-api-key-here"  # 请替换为您的实际 API 密钥
-    base_url: "https://api.openai.com/v1"
-    model_url: "https://api.openai.com/v1/models"
+  # ZAI Backend with Chinese default prompt
+  - name: "zai"
+    api_key: "REPLACE_WITH_YOUR_ACTUAL_API_KEY"
+    base_url: "https://open.bigmodel.cn/api/coding/paas/v4"
+    model_url: "https://open.bigmodel.cn/api/paas/v4"
     enabled: true
     timeout: 30
     priority: 1
     model_prefix:
       enabled: true
-      prefix: "openai"
+      prefix: "glm"
       separator: "/"
       override: false
+    default_prompt:
+      enabled: true
+      prompt: "请用中文回答用户的问题，提供专业和有用的信息。"
+
+  # OpenAI Backend with English default prompt
+  - name: "openai"
+    api_key: "REPLACE_WITH_YOUR_ACTUAL_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    model_url: "https://api.openai.com/v1/models"
+    enabled: false
+    timeout: 30
+    priority: 2
+    model_prefix:
+      enabled: true
+      prefix: "gpt"
+      separator: "-"
+      override: false
+    default_prompt:
+      enabled: true
+      prompt: "Please provide a helpful and accurate response to the user's question."
+
+  # Claude Backend without default prompt
+  - name: "claude"
+    api_key: "REPLACE_WITH_YOUR_ACTUAL_API_KEY"
+    base_url: "https://api.anthropic.com/v1"
+    model_url: "https://api.anthropic.com/v1/models"
+    enabled: false
+    timeout: 30
+    priority: 3
+    model_prefix:
+      enabled: true
+      prefix: "claude"
+      separator: "-"
+      override: false
+    # No default prompt configured - will reject empty prompts
 
 models:
-  # Auto-fetch all models from OpenAI with prefix
+  # Auto-fetch all models from enabled backends
+  - name: "*"
+    backend: "zai"
+    capabilities: ["completion", "tools", "thinking"]
+    enabled: true
+
   - name: "*"
     backend: "openai"
-    capabilities: ["completion", "tools"]
+    capabilities: ["completion", "tools", "function_calling"]
+    enabled: true
+
+  - name: "*"
+    backend: "claude"
+    capabilities: ["completion", "tools", "analysis"]
     enabled: true
 
 logging:

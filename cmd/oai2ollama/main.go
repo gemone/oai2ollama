@@ -3,26 +3,27 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
+	"github.com/gemone/oai2ollama/internal/config"
+	"github.com/gemone/oai2ollama/internal/handlers"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/log"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-	"github.com/gemone/oai2ollama/internal/config"
-	"github.com/gemone/oai2ollama/internal/handlers"
 )
 
 type CLIOptions struct {
 	ConfigPath string
-	Port      int
-	Host      string
-	Debug     bool
-	Version   bool
-	Help      bool
+	Port       int
+	Host       string
+	Debug      bool
+	Version    bool
+	Help       bool
 }
 
 func main() {
@@ -103,12 +104,7 @@ func main() {
 	// Create Fiber app with debug mode
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
-			log.Printf("[ERROR] Fiber Error Handler: %v (Type: %T)", err, err)
-
-			// In debug mode, print stack trace
-			if cfg.Server.Debug {
-				log.Printf("[ERROR] Stack Trace: %s", getStackTrace())
-			}
+			log.Errorf("Fiber Error Handler: %v (Type: %T)", err, err)
 
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
@@ -119,11 +115,10 @@ func main() {
 			if cfg.Server.Debug {
 				return c.Status(code).JSON(map[string]interface{}{
 					"error": map[string]interface{}{
-						"message":     err.Error(),
-						"type":        "internal_error",
-						"code":        "unknown_error",
-						"debug":       true,
-						"stack_trace": getStackTrace(),
+						"message": err.Error(),
+						"type":    "internal_error",
+						"code":    "unknown_error",
+						"debug":   true,
 					},
 				})
 			}
@@ -143,7 +138,8 @@ func main() {
 	app.Use(recover.New(recover.Config{
 		EnableStackTrace: true,
 		StackTraceHandler: func(c *fiber.Ctx, e interface{}) {
-			log.Printf("[PANIC] Stack trace: %v", e)
+			log.Errorf("[PANIC] Panic occurred: %v", e)
+			log.Errorf("[PANIC] Stack trace:\n%s", getDetailedStackTrace())
 		},
 	}))
 
@@ -172,17 +168,17 @@ func main() {
 			"config":      opts.ConfigPath,
 			"endpoints": map[string]interface{}{
 				"ollama_api": map[string]string{
-					"generate":    "POST /api/generate",
-					"chat":        "POST /api/chat",
-					"embeddings":  "POST /api/embeddings",
-					"tags":        "GET /api/tags",
-					"show":        "POST /api/show",
-					"ps":          "GET /api/ps",
-					"pull":        "POST /api/pull",
-					"delete":      "DELETE /api/delete",
-					"copy":        "POST /api/copy",
-					"create":      "POST /api/create",
-					"version":     "GET /api/version",
+					"generate":   "POST /api/generate",
+					"chat":       "POST /api/chat",
+					"embeddings": "POST /api/embeddings",
+					"tags":       "GET /api/tags",
+					"show":       "POST /api/show",
+					"ps":         "GET /api/ps",
+					"pull":       "POST /api/pull",
+					"delete":     "DELETE /api/delete",
+					"copy":       "POST /api/copy",
+					"create":     "POST /api/create",
+					"version":    "GET /api/version",
 				},
 			},
 		})
@@ -192,17 +188,28 @@ func main() {
 		return c.SendStatus(200)
 	})
 
+	// Debug endpoint for testing panic recovery (only in debug mode and development environment)
+	if cfg.Server.Debug && os.Getenv("ENV") == "development" {
+		app.Get("/debug/panic", func(c *fiber.Ctx) error {
+			log.Warnf("Debug panic endpoint triggered - this will test the panic recovery")
+			var testMap map[string]string
+			// This will cause a panic since testMap is nil
+			_ = testMap["key"]
+			return c.SendString("This should not be reached")
+		})
+	}
+
 	// Start server
 	host := cfg.Server.Host
 	port := cfg.Server.Port
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	log.Printf("Starting oai2ollama-go server on %s", addr)
+	log.Infof("Starting oai2ollama-go server on %s", addr)
 	if opts.ConfigPath != "" {
-		log.Printf("Using config file: %s", opts.ConfigPath)
+		log.Infof("Using config file: %s", opts.ConfigPath)
 	}
-	log.Printf("Health check: http://%s/", addr)
-	log.Printf("API docs: http://%s/api", addr)
+	log.Infof("Health check: http://%s/", addr)
+	log.Infof("API docs: http://%s/api", addr)
 
 	if err := app.Listen(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
@@ -214,15 +221,42 @@ func setupRoutes(app *fiber.App, ollamaHandler *handlers.OllamaHandler) {
 	api := app.Group("/api")
 
 	// Core Ollama API endpoints
-	api.Get("/tags", ollamaHandler.ListModels)           // List models
-	api.Post("/chat", ollamaHandler.Chat)                // Chat completion
-	api.Post("/generate", ollamaHandler.Generate)        // Generate completion
-	api.Post("/embeddings", ollamaHandler.Embeddings)    // Generate embeddings
-	api.Get("/version", ollamaHandler.Version)           // Get version
-	api.Get("/ps", ollamaHandler.ShowRunningModels)      // Show running models
-	api.Post("/pull", ollamaHandler.PullModel)           // Pull model (mock)
-	api.Post("/show", ollamaHandler.ShowModel)           // Show model information
-	api.Delete("/delete", ollamaHandler.DeleteModel)     // Delete model (mock)
+	api.Get("/tags", ollamaHandler.ListModels)        // List models
+	api.Post("/chat", ollamaHandler.Chat)             // Chat completion
+	api.Post("/generate", ollamaHandler.Generate)     // Generate completion
+	api.Post("/embeddings", ollamaHandler.Embeddings) // Generate embeddings
+	api.Get("/version", ollamaHandler.Version)        // Get version
+	api.Get("/ps", ollamaHandler.ShowRunningModels)   // Show running models
+	api.Post("/pull", ollamaHandler.PullModel)        // Pull model (mock)
+	api.Post("/show", ollamaHandler.ShowModel)        // Show model information
+	api.Delete("/delete", ollamaHandler.DeleteModel)  // Delete model (mock)
+}
+
+// getDetailedStackTrace returns a formatted stack trace with file paths and line numbers
+func getDetailedStackTrace() string {
+	buf := make([]byte, 1024)
+	for {
+		n := runtime.Stack(buf, false)
+		if n < len(buf) {
+			stackTrace := string(buf[:n])
+			// Format the stack trace to make it more readable
+			lines := strings.Split(stackTrace, "\n")
+			var formattedLines []string
+			for i, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					if i%2 == 0 { // Function name line
+						formattedLines = append(formattedLines, line)
+					} else { // File and line number line
+						trimmed := strings.TrimSpace(line)
+						trimmed = strings.TrimPrefix(trimmed, "\t")
+						formattedLines = append(formattedLines, "    → "+trimmed)
+					}
+				}
+			}
+			return strings.Join(formattedLines, "\n")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
 }
 
 func openConfigEditor() {
@@ -255,23 +289,4 @@ func openConfigEditor() {
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Run()
-}
-
-// getStackTrace returns the current stack trace as a string
-func getStackTrace() string {
-	buf := make([]byte, 1024)
-	for {
-		n := runtime.Stack(buf, false)
-		if n < len(buf) {
-			return string(buf[:n])
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-}
-
-// logDebug logs debug information if debug mode is enabled
-func logDebug(debug bool, format string, args ...interface{}) {
-	if debug {
-		log.Printf("[DEBUG] %s", fmt.Sprintf(format, args...))
-	}
 }

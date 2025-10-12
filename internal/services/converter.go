@@ -150,6 +150,11 @@ func (c *ModelConverter) ConvertOpenAIModelsList(openaiModels []models.OpenAIMod
 }
 
 func (c *ModelConverter) ParseModelName(modelName string) (*models.ModelParseResult, error) {
+	// Check if config is nil
+	if c == nil || c.config == nil {
+		return nil, fmt.Errorf("model converter or config is nil")
+	}
+
 	// 1. Check exact matches in manual model configurations
 	for _, model := range c.config.Models {
 		if model.Name == modelName && model.Enabled {
