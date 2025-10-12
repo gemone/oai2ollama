@@ -1,10 +1,13 @@
 import json
 import logging
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import StreamingResponse, Response
+from typing import Optional
 
 from .config import env
+from .database import db_manager
+from .metrics import track_api_metrics
 
 app = FastAPI()
 
@@ -31,6 +34,7 @@ async def root():
                 "version": "GET /api/version",
             },
             "openai_api": {"models": "GET /v1/models", "chat_completions": "POST /v1/chat/completions"},
+            "metrics": {"metrics": "GET /metrics or GET /metric"},
         },
     }
 
@@ -39,6 +43,37 @@ async def root():
 async def root_head():
     """HEAD endpoint for root path"""
     return Response(status_code=200)
+
+
+@app.get("/metrics")
+@app.get("/metric")
+async def get_metrics(model: Optional[str] = Query(None, description="Filter by specific model"), days: int = Query(7, ge=1, le=365, description="Number of days for daily stats"), limit: int = Query(100, ge=1, le=1000, description="Limit for recent calls")):
+    """Get API usage metrics and statistics"""
+    try:
+        # Get overall statistics
+        overall_stats = db_manager.get_overall_stats()
+
+        # Get model statistics
+        model_stats = db_manager.get_model_stats(model)
+
+        # Get daily statistics
+        daily_stats = db_manager.get_daily_stats(days)
+
+        # Get recent calls
+        recent_calls = db_manager.get_recent_calls(limit, model)
+
+        return {
+            "status": "success",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "overall": overall_stats,
+            "models": model_stats,
+            "daily": daily_stats,
+            "recent_calls": recent_calls[:10],  # Only return first 10 recent calls
+            "filters": {"model": model, "days": days, "limit": limit},
+        }
+    except Exception as e:
+        logger.error(f"Error getting metrics: {e}")
+        return {"status": "error", "message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 def get_ollama_timestamp():
@@ -151,6 +186,7 @@ def debug_api(endpoint: str = None, method: str = "GET"):
 
                 # Check if response is a streaming response
                 from fastapi.responses import StreamingResponse
+
                 if isinstance(result, StreamingResponse):
                     # For streaming responses, don't try to serialize the response body
                     _log_api_call(method, actual_endpoint, request_data=request_data, response_data=None)
@@ -293,6 +329,7 @@ async def list_models():
 
 @app.post("/v1/chat/completions")
 @debug_api(method="POST")
+@track_api_metrics("/v1/chat/completions", "POST")
 async def chat_completions(request: Request):
     data = await request.json()
     full_url = f"{str(env.base_url).rstrip('/')}/chat/completions"
@@ -331,6 +368,7 @@ async def chat_completions(request: Request):
 
 @app.post("/api/generate")
 @debug_api(method="POST")
+@track_api_metrics("/api/generate", "POST")
 async def generate_text(request: Request):
     """Generate text completion using OpenAI-compatible API"""
     data = await request.json()
@@ -417,6 +455,7 @@ async def generate_text(request: Request):
 
 @app.post("/api/chat")
 @debug_api(method="POST")
+@track_api_metrics("/api/chat", "POST")
 async def ollama_chat(request: Request):
     """Ollama chat endpoint using OpenAI-compatible API"""
     data = await request.json()
@@ -485,6 +524,7 @@ async def ollama_chat(request: Request):
 
 @app.post("/api/embeddings")
 @debug_api(method="POST")
+@track_api_metrics("/api/embeddings", "POST")
 async def create_embeddings(request: Request):
     """Create embeddings using OpenAI-compatible API"""
     data = await request.json()
