@@ -8,23 +8,23 @@ import (
 // OpenAI API Models
 
 type OpenAIChatCompletionRequest struct {
-	Model            string                 `json:"model"`
-	Messages         []OpenAIMessage        `json:"messages"`
-	MaxTokens        *int                   `json:"max_tokens,omitempty"`
-	Temperature      *float64               `json:"temperature,omitempty"`
-	TopP             *float64               `json:"top_p,omitempty"`
-	Stream           bool                   `json:"stream,omitempty"`
-	Stop             interface{}            `json:"stop,omitempty"`
-	PresencePenalty  *float64               `json:"presence_penalty,omitempty"`
-	FrequencyPenalty *float64               `json:"frequency_penalty,omitempty"`
-	Functions        []OpenAIFunction       `json:"functions,omitempty"`
-	FunctionCall     interface{}            `json:"function_call,omitempty"`
-	ResponseFormat   *OpenAIResponseFormat  `json:"response_format,omitempty"`
-	Seed             *int                   `json:"seed,omitempty"`
-	Tools            []OpenAITool           `json:"tools,omitempty"`
-	ToolChoice       interface{}            `json:"tool_choice,omitempty"`
-	User             string                 `json:"user,omitempty"`
-	Thinking         *OpenAIThinking         `json:"thinking,omitempty"`
+	Model            string                `json:"model"`
+	Messages         []OpenAIMessage       `json:"messages"`
+	MaxTokens        *int                  `json:"max_tokens,omitempty"`
+	Temperature      *float64              `json:"temperature,omitempty"`
+	TopP             *float64              `json:"top_p,omitempty"`
+	Stream           bool                  `json:"stream,omitempty"`
+	Stop             interface{}           `json:"stop,omitempty"`
+	PresencePenalty  *float64              `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float64              `json:"frequency_penalty,omitempty"`
+	Functions        []OpenAIFunction      `json:"functions,omitempty"`
+	FunctionCall     interface{}           `json:"function_call,omitempty"`
+	ResponseFormat   *OpenAIResponseFormat `json:"response_format,omitempty"`
+	Seed             *int                  `json:"seed,omitempty"`
+	Tools            []OpenAITool          `json:"tools,omitempty"`
+	ToolChoice       interface{}           `json:"tool_choice,omitempty"`
+	User             string                `json:"user,omitempty"`
+	Thinking         *OpenAIThinking       `json:"thinking,omitempty"`
 }
 
 type OpenAIThinking struct {
@@ -32,11 +32,11 @@ type OpenAIThinking struct {
 }
 
 type OpenAIMessage struct {
-	Role         string            `json:"role"`
-	Content      interface{}       `json:"content"`
-	Name         *string           `json:"name,omitempty"`
+	Role         string              `json:"role"`
+	Content      interface{}         `json:"content"`
+	Name         *string             `json:"name,omitempty"`
 	FunctionCall *OpenAIFunctionCall `json:"function_call,omitempty"`
-	ToolCalls    []OpenAIToolCall  `json:"tool_calls,omitempty"`
+	ToolCalls    []OpenAIToolCall    `json:"tool_calls,omitempty"`
 }
 
 type OpenAIFunction struct {
@@ -56,9 +56,9 @@ type OpenAITool struct {
 }
 
 type OpenAIToolCall struct {
-	ID       string               `json:"id"`
-	Type     string               `json:"type"`
-	Function OpenAIFunctionCall   `json:"function"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function OpenAIFunctionCall `json:"function"`
 }
 
 type OpenAIResponseFormat struct {
@@ -67,20 +67,20 @@ type OpenAIResponseFormat struct {
 }
 
 type OpenAIChatCompletionResponse struct {
-	ID                string                        `json:"id"`
-	Object            string                        `json:"object"`
-	Created           int64                         `json:"created"`
-	Model             string                        `json:"model"`
-	Choices           []OpenAIChatCompletionChoice  `json:"choices"`
-	Usage             *OpenAIUsage                  `json:"usage,omitempty"`
-	SystemFingerprint *string                       `json:"system_fingerprint,omitempty"`
+	ID                string                       `json:"id"`
+	Object            string                       `json:"object"`
+	Created           int64                        `json:"created"`
+	Model             string                       `json:"model"`
+	Choices           []OpenAIChatCompletionChoice `json:"choices"`
+	Usage             *OpenAIUsage                 `json:"usage,omitempty"`
+	SystemFingerprint *string                      `json:"system_fingerprint,omitempty"`
 }
 
 type OpenAIChatCompletionChoice struct {
-	Index        int                     `json:"index"`
-	Message      OpenAIMessage           `json:"message"`
-	FinishReason string                  `json:"finish_reason"`
-	Delta        *OpenAIMessage          `json:"delta,omitempty"`
+	Index        int            `json:"index"`
+	Message      OpenAIMessage  `json:"message"`
+	FinishReason string         `json:"finish_reason"`
+	Delta        *OpenAIMessage `json:"delta,omitempty"`
 }
 
 type OpenAIUsage struct {
@@ -104,15 +104,15 @@ type OpenAIModelsResponse struct {
 // Ollama API Models
 
 type OllamaChatRequest struct {
-	Model    string                  `json:"model"`
-	Messages []OllamaMessage         `json:"messages"`
-	Stream   bool                    `json:"stream,omitempty"`
-	Format   string                  `json:"format,omitempty"`
+	Model    string                   `json:"model"`
+	Messages []OllamaMessage          `json:"messages"`
+	Stream   bool                     `json:"stream,omitempty"`
+	Format   string                   `json:"format,omitempty"`
 	Options  *OllamaGenerationOptions `json:"options,omitempty"`
-	Template  string                 `json:"template,omitempty"`
-	System   string                  `json:"system,omitempty"`
-	Context  []int                   `json:"context,omitempty"`
-	Think    bool                    `json:"think,omitempty"`
+	Template string                   `json:"template,omitempty"`
+	System   string                   `json:"system,omitempty"`
+	Context  []int                    `json:"context,omitempty"`
+	Think    bool                     `json:"think,omitempty"`
 }
 
 type OllamaMessage struct {
@@ -121,28 +121,28 @@ type OllamaMessage struct {
 }
 
 type OllamaGenerationOptions struct {
-	Seed         *int     `json:"seed,omitempty"`
-	Temperature  *float64 `json:"temperature,omitempty"`
-	TopP         *float64 `json:"top_p,omitempty"`
-	TopK         *int     `json:"top_k,omitempty"`
-	NumPredict   *int     `json:"num_predict,omitempty"`
-	NumCtx       *int     `json:"num_ctx,omitempty"`
-	Stop         []string `json:"stop,omitempty"`
+	Seed             *int     `json:"seed,omitempty"`
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"top_p,omitempty"`
+	TopK             *int     `json:"top_k,omitempty"`
+	NumPredict       *int     `json:"num_predict,omitempty"`
+	NumCtx           *int     `json:"num_ctx,omitempty"`
+	Stop             []string `json:"stop,omitempty"`
 	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
 	PresencePenalty  *float64 `json:"presence_penalty,omitempty"`
 }
 
 type OllamaChatResponse struct {
-	Model              string                 `json:"model"`
-	CreatedAt          time.Time              `json:"created_at"`
-	Message            OllamaMessage          `json:"message"`
-	Done               bool                   `json:"done"`
-	TotalDuration      int64                  `json:"total_duration,omitempty"`
-	LoadDuration       int64                  `json:"load_duration,omitempty"`
-	PromptEvalCount    int                    `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration int64                  `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int                    `json:"eval_count,omitempty"`
-	EvalDuration       int64                  `json:"eval_duration,omitempty"`
+	Model              string        `json:"model"`
+	CreatedAt          time.Time     `json:"created_at"`
+	Message            OllamaMessage `json:"message"`
+	Done               bool          `json:"done"`
+	TotalDuration      int64         `json:"total_duration,omitempty"`
+	LoadDuration       int64         `json:"load_duration,omitempty"`
+	PromptEvalCount    int           `json:"prompt_eval_count,omitempty"`
+	PromptEvalDuration int64         `json:"prompt_eval_duration,omitempty"`
+	EvalCount          int           `json:"eval_count,omitempty"`
+	EvalDuration       int64         `json:"eval_duration,omitempty"`
 }
 
 type OllamaModelInfo struct {
@@ -161,36 +161,36 @@ type OllamaModelsResponse struct {
 }
 
 type OllamaGenerateRequest struct {
-	Model    string                  `json:"model"`
-	Prompt   string                  `json:"prompt"`
-	Stream   bool                    `json:"stream,omitempty"`
-	Format   string                  `json:"format,omitempty"`
+	Model    string                   `json:"model"`
+	Prompt   string                   `json:"prompt"`
+	Stream   bool                     `json:"stream,omitempty"`
+	Format   string                   `json:"format,omitempty"`
 	Options  *OllamaGenerationOptions `json:"options,omitempty"`
-	Template  string                 `json:"template,omitempty"`
-	System   string                  `json:"system,omitempty"`
-	Context  []int                   `json:"context,omitempty"`
-	Raw      bool                    `json:"raw,omitempty"`
-	Images   []string                `json:"images,omitempty"`
-	Think    bool                    `json:"think,omitempty"`
+	Template string                   `json:"template,omitempty"`
+	System   string                   `json:"system,omitempty"`
+	Context  []int                    `json:"context,omitempty"`
+	Raw      bool                     `json:"raw,omitempty"`
+	Images   []string                 `json:"images,omitempty"`
+	Think    bool                     `json:"think,omitempty"`
 }
 
 type OllamaGenerateResponse struct {
-	Model              string                 `json:"model"`
-	CreatedAt          time.Time              `json:"created_at"`
-	Response           string                 `json:"response,omitempty"`
-	Done               bool                   `json:"done"`
-	Context            []int                  `json:"context,omitempty"`
-	TotalDuration      int64                  `json:"total_duration,omitempty"`
-	LoadDuration       int64                  `json:"load_duration,omitempty"`
-	PromptEvalCount    int                    `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration int64                  `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int                    `json:"eval_count,omitempty"`
-	EvalDuration       int64                  `json:"eval_duration,omitempty"`
+	Model              string    `json:"model"`
+	CreatedAt          time.Time `json:"created_at"`
+	Response           string    `json:"response,omitempty"`
+	Done               bool      `json:"done"`
+	Context            []int     `json:"context,omitempty"`
+	TotalDuration      int64     `json:"total_duration,omitempty"`
+	LoadDuration       int64     `json:"load_duration,omitempty"`
+	PromptEvalCount    int       `json:"prompt_eval_count,omitempty"`
+	PromptEvalDuration int64     `json:"prompt_eval_duration,omitempty"`
+	EvalCount          int       `json:"eval_count,omitempty"`
+	EvalDuration       int64     `json:"eval_duration,omitempty"`
 }
 
 type OllamaEmbeddingsRequest struct {
-	Model   string   `json:"model"`
-	Prompt string   `json:"prompt"`
+	Model   string                 `json:"model"`
+	Prompt  string                 `json:"prompt"`
 	Options map[string]interface{} `json:"options,omitempty"`
 }
 
@@ -200,17 +200,18 @@ type OllamaEmbeddingsResponse struct {
 
 type OllamaShowRequest struct {
 	Name    string `json:"name"`
+	Model   string `json:"model"`
 	Verbose bool   `json:"verbose,omitempty"`
 }
 
 type OllamaShowResponse struct {
-	Modelfile   string                 `json:"modelfile"`
-	Parameters  string                 `json:"parameters"`
-	Template    string                 `json:"template"`
-	Details     map[string]interface{} `json:"details"`
-	ModelInfo   map[string]interface{} `json:"model_info,omitempty"`
-	ModifiedAt  time.Time             `json:"modified_at"`
-	Capabilities []string              `json:"capabilities,omitempty"`
+	Modelfile    string                 `json:"modelfile"`
+	Parameters   string                 `json:"parameters"`
+	Template     string                 `json:"template"`
+	Details      map[string]interface{} `json:"details"`
+	ModelInfo    map[string]interface{} `json:"model_info,omitempty"`
+	ModifiedAt   time.Time              `json:"modified_at"`
+	Capabilities []string               `json:"capabilities,omitempty"`
 }
 
 // Internal Models
