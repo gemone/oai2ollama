@@ -182,6 +182,14 @@ def _new_client(base_url: str | None = None):
     return AsyncClient(base_url=url, headers={"Authorization": f"Bearer {env.api_key}"}, timeout=60, http2=True, follow_redirects=True)
 
 
+def _new_streaming_client(base_url: str | None = None):
+    from httpx import AsyncClient, Timeout
+
+    url = base_url or str(env.base_url)
+    # For streaming requests, use no timeout to allow long-running responses
+    return AsyncClient(base_url=url, headers={"Authorization": f"Bearer {env.api_key}"}, timeout=None, http2=True, follow_redirects=True)
+
+
 @app.get("/api/tags")
 @debug_api(method="GET")
 async def models():
@@ -296,7 +304,7 @@ async def chat_completions(request: Request):
     if data.get("stream", False):
 
         async def stream():
-            async with _new_client() as client, client.stream("POST", "/chat/completions", json=data) as response:
+            async with _new_streaming_client() as client, client.stream("POST", "/chat/completions", json=data) as response:
                 # 记录流式请求
                 _log_api_call("POST", full_url, request_data={**data, "stream": True})
 
@@ -355,7 +363,7 @@ async def generate_text(request: Request):
 
         async def stream():
             try:
-                async with _new_client() as client, client.stream("POST", "/chat/completions", json=openai_request) as response:
+                async with _new_streaming_client() as client, client.stream("POST", "/chat/completions", json=openai_request) as response:
                     _log_api_call("POST", full_url, request_data=openai_request)
 
                     async for line in response.aiter_lines():
@@ -429,7 +437,7 @@ async def ollama_chat(request: Request):
 
         async def stream():
             try:
-                async with _new_client() as client, client.stream("POST", "/chat/completions", json=openai_request) as response:
+                async with _new_streaming_client() as client, client.stream("POST", "/chat/completions", json=openai_request) as response:
                     _log_api_call("POST", full_url, request_data={**debug_data, "stream": True})
 
                     async for line in response.aiter_lines():
