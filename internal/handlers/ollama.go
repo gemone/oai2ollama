@@ -188,7 +188,7 @@ func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 		openAIRequest.Thinking = &models.OpenAIThinking{
 			Type: "enabled",
 		}
-		log.Debugf("Think parameter detected, converted to thinking format")
+		log.Debug("Think parameter detected, converted to thinking format")
 	}
 
 	// Add nil check for Options

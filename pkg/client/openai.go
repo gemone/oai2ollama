@@ -113,6 +113,9 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionRequest) (*models.OpenAIChatCompletionResponse, error) {
 	url := fmt.Sprintf("%s/chat/completions", c.baseURL)
 
+	// Detect thinking mode
+	thinkingEnabled := request.Thinking != nil && request.Thinking.Type == "enabled"
+
 	jsonData, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -121,6 +124,9 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	if c.debug {
 		log.Debugf("ChatCompletion Request: POST %s", url)
 		log.Debugf("ChatCompletion Request Body: %s", string(jsonData))
+		if thinkingEnabled {
+			log.Debug("ChatCompletion: Thinking mode detected (type: enabled)")
+		}
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -135,9 +141,18 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 		log.Debugf("ChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
 	}
 
-	// Use a client with timeout for non-streaming requests
-	timeoutClient := c.getTimeoutClient()
-	resp, err := timeoutClient.Do(req)
+	// Use appropriate client based on thinking mode
+	var resp *http.Response
+	if thinkingEnabled {
+		if c.debug {
+			log.Debug("ChatCompletion: Using no-timeout client for thinking mode")
+		}
+		resp, err = c.client.Do(req) // Use client with no timeout for thinking mode
+	} else {
+		timeoutClient := c.getTimeoutClient()
+		resp, err = timeoutClient.Do(req) // Use client with timeout for normal mode
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete chat: %w", err)
 	}
