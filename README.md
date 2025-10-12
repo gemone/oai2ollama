@@ -15,11 +15,12 @@ uvx oai2ollama --help
 ```
 
 ```text
-usage: oai2ollama [--api-key str] [--base-url HttpUrl] [--capabilities list[str]] [--models list[str]] [--host str]
+usage: oai2ollama [--api-key str] [--base-url HttpUrl] [--fetch-model-url HttpUrl] [--capabilities list[str]] [--models list[str]] [--host str]
 options:
   --help, -h                    Show this help message and exit
   --api-key str                 API key for authentication (required)
   --base-url HttpUrl            Base URL for the OpenAI-compatible API (required)
+  --fetch-model-url HttpUrl     Alternative URL for fetching models (optional)
   --capabilities, -c list[str]  Extra capabilities to mark the model as supporting
   --models, -m list[str]        Extra models to include in the /api/tags response
   --host str                    IP / hostname for the API server (default: localhost)
@@ -44,6 +45,7 @@ Or you can use a `.env` file to set these options:
 ```properties
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=your_base_url
+FETCH_MODEL_URL=your_alternative_model_url
 HOST=0.0.0.0
 CAPABILITIES=["vision","thinking"]
 MODELS=["custom-model1","custom-model2"]
@@ -51,6 +53,29 @@ MODELS=["custom-model1","custom-model2"]
 
 > [!WARNING]
 > The option name `capacities` is deprecated. Use `capabilities` instead. The old name still works for now but will emit a deprecation warning.
+
+## New Features
+
+### Alternative Model URL Support
+
+You can now specify an alternative URL for fetching models using the `--fetch-model-url` option or `FETCH_MODEL_URL` environment variable. This is useful when:
+
+- Your model list is available from a different endpoint than your chat completion API
+- You want to use a dedicated model service for model discovery
+- You need fallback model sources
+
+**Usage:**
+
+```sh
+oai2ollama --fetch-model-url https://models.example.com/v1 --base-url https://chat.example.com/v1
+```
+
+**Fallback Behavior:**
+
+- The system will first try to fetch models from `FETCH_MODEL_URL` if provided
+- If that fails, it will fall back to `BASE_URL`
+- If both fail, it will only return the models specified via `--models` parameter
+- Chat completions always use `BASE_URL` regardless of where models were fetched from
 
 ### with Docker
 
@@ -66,13 +91,14 @@ Then, run the container with your credentials:
 docker run -p 11434:11434 \
   -e OPENAI_API_KEY="your_api_key" \
   -e OPENAI_BASE_URL="your_base_url" \
+  -e FETCH_MODEL_URL="your_alternative_model_url" \
   oai2ollama
 ```
 
 Or you can pass these as command line arguments:
 
 ```sh
-docker run -p 11434:11434 oai2ollama --api-key your_api_key --base-url your_base_url
+docker run -p 11434:11434 oai2ollama --api-key your_api_key --base-url your_base_url --fetch-model-url your_alternative_model_url
 ```
 
 To have the server listen on a different host, like all IPv6 interfaces, use the `--host` argument:

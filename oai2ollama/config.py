@@ -20,10 +20,13 @@ class Settings(BaseSettings):
 
     api_key: str = Field(getenv("OPENAI_API_KEY", ...), description="API key for authentication")  # type: ignore
     base_url: HttpUrl = Field(getenv("OPENAI_BASE_URL", ...), description="Base URL for the OpenAI-compatible API")  # type: ignore
+    fetch_model_url: HttpUrl | None = Field(getenv("FETCH_MODEL_URL"), description="Alternative URL for fetching models")  # type: ignore
     capacities: CliSuppress[list[Literal["tools", "insert", "vision", "embedding", "thinking"]]] = Field([], repr=False)
     capabilities: list[Literal["tools", "insert", "vision", "embedding", "thinking"]] = []
     host: str = Field("localhost", description="IP / hostname for the API server")
     extra_models: list[str] = Field([], description="Extra models to include in the /api/tags response", alias="models")
+    debug_api_calls: bool = Field(getenv("DEBUG_API_CALLS", "false").lower() == "true", description="Enable API call debugging to show actual URLs and content")
+    debug_log_response_body: bool = Field(getenv("DEBUG_LOG_RESPONSE_BODY", "true").lower() == "true", description="Whether to include response body in debug logs (can be large)")
 
     @model_validator(mode="after")
     def _warn_legacy_capacities(self: Self):
