@@ -6,19 +6,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gemone/oai2ollama/internal/config"
 	"github.com/gemone/oai2ollama/internal/models"
+
+	"github.com/gofiber/fiber/v2/log"
 )
 
 const (
 	sanitizedHeaderPrefixLen = 8
 	sanitizedHeaderSuffixLen = 4
-	sensitiveHeaderMinLength = 15
 )
 
 type OpenAIClient struct {
@@ -72,8 +72,8 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 	req.Header.Set("Content-Type", "application/json")
 
 	if c.debug {
-		log.Printf("[DEBUG] GetModels Request: GET %s", url)
-		log.Printf("[DEBUG] GetModels Headers: %+v", sanitizeHeadersForLogging(req.Header))
+		log.Debugf("GetModels Request: GET %s", url)
+		log.Debugf("GetModels Headers: %+v", sanitizeHeadersForLogging(req.Header))
 	}
 
 	// Use a client with timeout for non-streaming requests
@@ -90,8 +90,8 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] GetModels Response Status: %d", resp.StatusCode)
-		log.Printf("[DEBUG] GetModels Response Body: %s", string(body))
+		log.Debugf("GetModels Response Status: %d", resp.StatusCode)
+		log.Debugf("GetModels Response Body: %s", string(body))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -104,7 +104,7 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] GetModels Parsed Response: %+v", response)
+		log.Debugf("GetModels Parsed Response: %+v", response)
 	}
 
 	return response.Data, nil
@@ -119,8 +119,8 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] ChatCompletion Request: POST %s", url)
-		log.Printf("[DEBUG] ChatCompletion Request Body: %s", string(jsonData))
+		log.Debugf("ChatCompletion Request: POST %s", url)
+		log.Debugf("ChatCompletion Request Body: %s", string(jsonData))
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -132,7 +132,7 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	req.Header.Set("Content-Type", "application/json")
 
 	if c.debug {
-		log.Printf("[DEBUG] ChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
+		log.Debugf("ChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
 	}
 
 	// Use a client with timeout for non-streaming requests
@@ -149,8 +149,8 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] ChatCompletion Response Status: %d", resp.StatusCode)
-		log.Printf("[DEBUG] ChatCompletion Response Body: %s", string(body))
+		log.Debugf("ChatCompletion Response Status: %d", resp.StatusCode)
+		log.Debugf("ChatCompletion Response Body: %s", string(body))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -163,7 +163,7 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] ChatCompletion Parsed Response: %+v", response)
+		log.Debugf("ChatCompletion Parsed Response: %+v", response)
 	}
 
 	return &response, nil
@@ -186,9 +186,9 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] StreamChatCompletion Request: POST %s", url)
-		log.Printf("[DEBUG] StreamChatCompletion Request Body: %s", string(jsonData))
-		log.Printf("[DEBUG] StreamChatCompletion: Chunk timeout recalculation enabled")
+		log.Debugf("StreamChatCompletion Request: POST %s", url)
+		log.Debugf("StreamChatCompletion Request Body: %s", string(jsonData))
+		log.Debugf("StreamChatCompletion: Chunk timeout recalculation enabled")
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -201,7 +201,7 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 	req.Header.Set("Accept", "text/event-stream")
 
 	if c.debug {
-		log.Printf("[DEBUG] StreamChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
+		log.Debugf("StreamChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
 	}
 
 	resp, err := c.client.Do(req)
@@ -210,8 +210,8 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] StreamChatCompletion Response Status: %d", resp.StatusCode)
-		log.Printf("[DEBUG] StreamChatCompletion Response Headers: %+v", sanitizeHeadersForLogging(resp.Header))
+		log.Debugf("StreamChatCompletion Response Status: %d", resp.StatusCode)
+		log.Debugf("StreamChatCompletion Response Headers: %+v", sanitizeHeadersForLogging(resp.Header))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -231,7 +231,7 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 			chunkTimeout := c.calculateChunkTimeout()
 
 			if c.debug {
-				log.Printf("[DEBUG] StreamChatCompletion: Starting chunk read with timeout %v", chunkTimeout)
+				log.Debugf("StreamChatCompletion: Starting chunk read with timeout %v", chunkTimeout)
 			}
 
 			// Use a channel to implement per-chunk timeout
@@ -252,12 +252,12 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 				if result.err != nil {
 					if result.err == io.EOF {
 						if c.debug {
-							log.Printf("[DEBUG] StreamChatCompletion: EOF reached")
+							log.Debugf("StreamChatCompletion: EOF reached")
 						}
 						return
 					}
 					if c.debug {
-						log.Printf("[DEBUG] StreamChatCompletion error reading line: %v", result.err)
+						log.Debugf("StreamChatCompletion error reading line: %v", result.err)
 					}
 					continue
 				}
@@ -267,12 +267,12 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 				}
 
 				if c.debug {
-					log.Printf("[DEBUG] StreamChatCompletion SSE Line: %s", result.line)
+					log.Debugf("StreamChatCompletion SSE Line: %s", result.line)
 				}
 
 				if result.line == "data: [DONE]" {
 					if c.debug {
-						log.Printf("[DEBUG] StreamChatCompletion: Received [DONE]")
+						log.Debugf("StreamChatCompletion: Received [DONE]")
 					}
 					return
 				}
@@ -286,19 +286,19 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 				var response models.OpenAIChatCompletionResponse
 				if err := json.Unmarshal(jsonData, &response); err != nil {
 					if c.debug {
-						log.Printf("[DEBUG] StreamChatCompletion error unmarshaling: %v, data: %s", err, string(jsonData))
+						log.Debugf("StreamChatCompletion error unmarshaling: %v, data: %s", err, string(jsonData))
 					}
 					continue
 				}
 
 				if c.debug {
-					log.Printf("[DEBUG] StreamChatCompletion Parsed Response: %+v", response)
+					log.Debugf("StreamChatCompletion Parsed Response: %+v", response)
 				}
 
 				ch <- response
 			case <-time.After(chunkTimeout):
 				if c.debug {
-					log.Printf("[DEBUG] StreamChatCompletion: Chunk timeout reached, recalculating for next chunk")
+					log.Debugf("StreamChatCompletion: Chunk timeout reached, recalculating for next chunk")
 				}
 				// Continue to next iteration with new timeout calculation
 				continue
@@ -331,8 +331,8 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] GenerateEmbeddings Request: POST %s", url)
-		log.Printf("[DEBUG] GenerateEmbeddings Request Body: %s", string(jsonData))
+		log.Debugf("GenerateEmbeddings Request: POST %s", url)
+		log.Debugf("GenerateEmbeddings Request Body: %s", string(jsonData))
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -344,7 +344,7 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	req.Header.Set("Content-Type", "application/json")
 
 	if c.debug {
-		log.Printf("[DEBUG] GenerateEmbeddings Headers: %+v", sanitizeHeadersForLogging(req.Header))
+		log.Debugf("GenerateEmbeddings Headers: %+v", sanitizeHeadersForLogging(req.Header))
 	}
 
 	resp, err := c.client.Do(req)
@@ -359,8 +359,8 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] GenerateEmbeddings Response Status: %d", resp.StatusCode)
-		log.Printf("[DEBUG] GenerateEmbeddings Response Body: %s", string(body))
+		log.Debugf("GenerateEmbeddings Response Status: %d", resp.StatusCode)
+		log.Debugf("GenerateEmbeddings Response Body: %s", string(body))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -386,7 +386,7 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	}
 
 	if c.debug {
-		log.Printf("[DEBUG] GenerateEmbeddings Parsed Response: %+v", openAIResponse)
+		log.Debugf("GenerateEmbeddings Parsed Response: %+v", openAIResponse)
 	}
 
 	if len(openAIResponse.Data) == 0 {
