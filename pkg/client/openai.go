@@ -185,10 +185,16 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	// Detect thinking mode
+	thinkingEnabled := request.Thinking != nil && request.Thinking.Type == "enabled"
+
 	if c.debug {
 		log.Debugf("StreamChatCompletion Request: POST %s", url)
 		log.Debugf("StreamChatCompletion Request Body: %s", string(jsonData))
 		log.Debugf("StreamChatCompletion: Chunk timeout recalculation enabled")
+		if thinkingEnabled {
+			log.Debugf("StreamChatCompletion: Thinking mode detected (type: enabled)")
+		}
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -228,10 +234,17 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 
 		for {
 			// Calculate timeout for each chunk
-			chunkTimeout := c.calculateChunkTimeout()
-
-			if c.debug {
-				log.Debugf("StreamChatCompletion: Starting chunk read with timeout %v", chunkTimeout)
+			var chunkTimeout time.Duration
+			if thinkingEnabled {
+				chunkTimeout = 0 // No timeout when thinking is enabled
+				if c.debug {
+					log.Debugf("StreamChatCompletion: Thinking mode enabled, no timeout for chunks")
+				}
+			} else {
+				chunkTimeout = c.calculateChunkTimeout()
+				if c.debug {
+					log.Debugf("StreamChatCompletion: Starting chunk read with timeout %v", chunkTimeout)
+				}
 			}
 
 			// Use a channel to implement per-chunk timeout
@@ -247,8 +260,9 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 				resultChan <- readResult{line: line, err: err}
 			}()
 
-			select {
-			case result := <-resultChan:
+			if thinkingEnabled {
+				// No timeout, just wait for result
+				result := <-resultChan
 				if result.err != nil {
 					if result.err == io.EOF {
 						if c.debug {
@@ -296,12 +310,64 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 				}
 
 				ch <- response
-			case <-time.After(chunkTimeout):
-				if c.debug {
-					log.Debugf("StreamChatCompletion: Chunk timeout reached, recalculating for next chunk")
+			} else {
+				// With timeout
+				select {
+				case result := <-resultChan:
+					if result.err != nil {
+						if result.err == io.EOF {
+							if c.debug {
+								log.Debugf("StreamChatCompletion: EOF reached")
+							}
+							return
+						}
+						if c.debug {
+							log.Debugf("StreamChatCompletion error reading line: %v", result.err)
+						}
+						continue
+					}
+
+					if result.line == "" {
+						continue
+					}
+
+					if c.debug {
+						log.Debugf("StreamChatCompletion SSE Line: %s", result.line)
+					}
+
+					if result.line == "data: [DONE]" {
+						if c.debug {
+							log.Debugf("StreamChatCompletion: Received [DONE]")
+						}
+						return
+					}
+
+					if !bytes.HasPrefix([]byte(result.line), []byte("data: ")) {
+						continue
+					}
+
+					jsonData := bytes.TrimPrefix([]byte(result.line), []byte("data: "))
+
+					var response models.OpenAIChatCompletionResponse
+					if err := json.Unmarshal(jsonData, &response); err != nil {
+						if c.debug {
+							log.Debugf("StreamChatCompletion error unmarshaling: %v, data: %s", err, string(jsonData))
+						}
+						continue
+					}
+
+					if c.debug {
+						log.Debugf("StreamChatCompletion Parsed Response: %+v", response)
+					}
+
+					ch <- response
+				case <-time.After(chunkTimeout):
+					if c.debug {
+						log.Debugf("StreamChatCompletion: Chunk timeout reached, recalculating for next chunk")
+					}
+					// Continue to next iteration with new timeout calculation
+					continue
 				}
-				// Continue to next iteration with new timeout calculation
-				continue
 			}
 		}
 	}()

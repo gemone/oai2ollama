@@ -24,6 +24,11 @@ type OpenAIChatCompletionRequest struct {
 	Tools            []OpenAITool           `json:"tools,omitempty"`
 	ToolChoice       interface{}            `json:"tool_choice,omitempty"`
 	User             string                 `json:"user,omitempty"`
+	Thinking         *OpenAIThinking         `json:"thinking,omitempty"`
+}
+
+type OpenAIThinking struct {
+	Type string `json:"type"`
 }
 
 type OpenAIMessage struct {
@@ -107,6 +112,7 @@ type OllamaChatRequest struct {
 	Template  string                 `json:"template,omitempty"`
 	System   string                  `json:"system,omitempty"`
 	Context  []int                   `json:"context,omitempty"`
+	Think    bool                    `json:"think,omitempty"`
 }
 
 type OllamaMessage struct {
@@ -165,6 +171,7 @@ type OllamaGenerateRequest struct {
 	Context  []int                   `json:"context,omitempty"`
 	Raw      bool                    `json:"raw,omitempty"`
 	Images   []string                `json:"images,omitempty"`
+	Think    bool                    `json:"think,omitempty"`
 }
 
 type OllamaGenerateResponse struct {

@@ -70,8 +70,10 @@ func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Debugf("Parsed request: Model=%s, MessagesCount=%d, Stream=%t",
-		request.Model, len(request.Messages), request.Stream)
+	log.Debugf("Request Body: %s", string(c.Body()))
+
+	log.Debugf("Parsed request: Model=%s, MessagesCount=%d, Stream=%t, Think=%t",
+		request.Model, len(request.Messages), request.Stream, request.Think)
 
 	// Validate request
 	if request.Model == "" {
@@ -179,6 +181,14 @@ func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 			i, msg.Role, msg.Content)
 		openAIRequest.Messages[i] = models.OllamaToOpenAIMessage(msg)
 		log.Debugf("Converted message %d successfully", i)
+	}
+
+	// Convert Ollama think parameter to OpenAI thinking format
+	if request.Think {
+		openAIRequest.Thinking = &models.OpenAIThinking{
+			Type: "enabled",
+		}
+		log.Debugf("Think parameter detected, converted to thinking format")
 	}
 
 	// Add nil check for Options
@@ -422,6 +432,13 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 		}
 	}
 
+	// Convert Ollama think parameter to OpenAI thinking format
+	if request.Think {
+		chatHandlerRequest.Thinking = &models.OpenAIThinking{
+			Type: "enabled",
+		}
+	}
+
 	// Get backend for this model using cache
 	backendName, err := h.modelCache.GetBackendForModel(request.Model)
 	if err != nil {
@@ -473,8 +490,9 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 	c.Set("Connection", "keep-alive")
 	c.Set("Access-Control-Allow-Origin", "*")
 
-	// Start streaming
+	// Start streaming (thinking detection is handled inside the client)
 	ch, err := backendClient.StreamChatCompletion(request)
+
 	if err != nil {
 		return c.Status(500).JSON(models.OllamaErrorResponse{
 			Error: fmt.Sprintf("Failed to start stream: %v", err),
