@@ -56,20 +56,37 @@ backends:
     # No default prompt configured - will reject empty prompts
 
 models:
-  # Auto-fetch all models from enabled backends
+  # Auto-fetch all models from enabled backends (wildcard configuration)
   - name: "*"
     backend: "zai"
     capabilities: ["completion", "tools", "thinking"]
     enabled: true
 
-  - name: "*"
-    backend: "openai"
-    capabilities: ["completion", "tools", "function_calling"]
+  # Custom model aliases - these will be added as additional entries if the original model exists in backend
+  - name: "chat-glm4"  # Custom alias
+    backend: "zai"
+    original_name: "glm-4.5"  # Points to the actual model in backend
+    capabilities: ["completion", "tools"]
     enabled: true
 
-  - name: "*"
-    backend: "claude"
-    capabilities: ["completion", "tools", "analysis"]
+  - name: "advanced-glm"  # Another custom alias
+    backend: "zai"
+    original_name: "glm-4.5-air"
+    capabilities: ["completion", "tools", "thinking"]
+    enabled: true
+
+  # Example of custom model that doesn't exist (will be skipped with warning after verification)
+  - name: "nonexistent-model"
+    backend: "zai"
+    original_name: "model-that-does-not-exist"
+    capabilities: ["completion"]
+    enabled: true
+
+  # Example of custom model with wrong backend (will be skipped with warning)
+  - name: "test-gpt"
+    backend: "openai"  # Backend is disabled
+    original_name: "gpt-4"
+    capabilities: ["completion"]
     enabled: true
 
 logging:

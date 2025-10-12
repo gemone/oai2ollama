@@ -120,7 +120,7 @@ func (mc *ModelCache) refreshModels() {
 		}
 	}
 
-	// Process manually configured models
+	// Process manually configured models (aliases)
 	for _, model := range mc.config.Models {
 		if !model.Enabled {
 			continue
@@ -131,33 +131,79 @@ func (mc *ModelCache) refreshModels() {
 			continue
 		}
 
-		// Check if model already exists from backend fetch
-		if existingModel, exists := mc.cachedModels[model.Name]; exists {
-			// Update existing model with manual configuration details
-			if len(model.Capabilities) > 0 {
-				existingModel.Details["capabilities"] = model.Capabilities
-				mc.cachedModels[model.Name] = existingModel
-			}
-		} else {
-			// Create new manual model (for models not fetched from backend)
-			manualModel := models.OllamaModelInfo{
-				Name:  model.Name,
-				Model: model.Name,
-				Details: map[string]interface{}{
-					"parent_model":       "",
-					"format":             "gguf",
-					"family":             "manual",
-					"families":           nil,
-					"parameter_size":     "unknown",
-					"quantization_level": "unknown",
-					"backend":            model.Backend,
-					"original_name":      model.OriginalName,
-					"capabilities":       model.Capabilities,
-				},
-			}
-			mc.cachedModels[model.Name] = manualModel
-			mc.modelMap[model.Name] = model.Backend
+		// Check if this custom model name already exists in cache
+		if _, exists := mc.cachedModels[model.Name]; exists {
+			// Model name already exists, skip to avoid duplicates
+			log.Debugf("Custom model name %s already exists, skipping", model.Name)
+			continue
 		}
+
+		// Find the corresponding backend client
+		backendClient, backendExists := mc.clients[model.Backend]
+		if !backendExists {
+			log.Warnf("Backend %s not found for custom model %s, skipping", model.Backend, model.Name)
+			continue
+		}
+
+		// Check if the original model exists in the backend
+		originalModelName := model.OriginalName
+		if originalModelName == "" {
+			originalModelName = model.Name
+		}
+
+		// Get all models from the backend to check if original model exists
+		openaiModels, err := backendClient.GetModels()
+		if err != nil {
+			log.Warnf("Failed to get models from backend %s for custom model %s: %v", model.Backend, model.Name, err)
+			continue
+		}
+
+		// Look for the original model in the backend
+		var foundModel *models.OpenAIModel
+		for _, openaiModel := range openaiModels {
+			if openaiModel.ID == originalModelName {
+				foundModel = &openaiModel
+				break
+			}
+		}
+
+		if foundModel == nil {
+			log.Warnf("Original model %s not found in backend %s for custom model %s, skipping",
+				originalModelName, model.Backend, model.Name)
+			continue
+		}
+
+		// Verify the model actually exists using the already-fetched models list
+		if !mc.verifyModelExistsFromList(openaiModels, originalModelName) {
+			log.Warnf("Model %s verification failed in backend %s for custom model %s, skipping",
+				originalModelName, model.Backend, model.Name)
+			continue
+		}
+
+		// Get backend configuration for prefix handling
+		var backendConfig *config.BackendConfig
+		for _, backend := range mc.config.Backends {
+			if backend.Name == model.Backend {
+				backendConfig = &backend
+				break
+			}
+		}
+
+		// Convert the found model to Ollama format using the custom name
+		customModel := mc.convertSingleModel(*foundModel, model.Name, model.Backend, backendConfig)
+
+		// Override with manual configuration details
+		if len(model.Capabilities) > 0 {
+			customModel.Details["capabilities"] = model.Capabilities
+		}
+		if model.OriginalName != "" {
+			customModel.Details["original_name"] = model.OriginalName
+		}
+
+		// Add to cache
+		log.Debugf("Adding custom model: %s -> %s (backend: %s)", model.Name, originalModelName, model.Backend)
+		mc.cachedModels[model.Name] = customModel
+		mc.modelMap[model.Name] = model.Backend
 	}
 
 	mc.lastUpdate = time.Now()
@@ -282,4 +328,62 @@ func (mc *ModelCache) GetCacheInfo() map[string]interface{} {
 		"last_update":  mc.lastUpdate,
 		"backends":     len(mc.clients),
 	}
+}
+
+// convertSingleModel converts a single OpenAI model to Ollama format with custom name
+func (mc *ModelCache) convertSingleModel(openaiModel models.OpenAIModel, customName, backendName string, backendConfig *config.BackendConfig) models.OllamaModelInfo {
+	// For custom models, use the provided custom name instead of applying prefix logic
+	modelName := customName
+	originalName := openaiModel.ID
+
+	// Create a SHA256 digest using the existing converter implementation
+	digest := mc.converter.GenerateModelDigest(openaiModel.ID, openaiModel.Created)
+
+	return models.OllamaModelInfo{
+		Name:       modelName,
+		Model:      modelName,
+		Digest:     digest,
+		ModifiedAt: time.Now(),
+		Size:       mc.converter.EstimateModelSize(openaiModel.ID), // Use existing converter implementation
+		Details: map[string]interface{}{
+			"parent_model":       "",
+			"format":             "gguf",
+			"family":             extractFamily(openaiModel.ID),
+			"families":           []string{extractFamily(openaiModel.ID)},
+			"parameter_size":     mc.converter.ExtractParameterSize(openaiModel.ID), // Use existing implementation
+			"quantization_level": "unknown",
+			"backend":            backendName,
+			"original_name":      originalName,
+			"openai_created":     openaiModel.Created,
+			"openai_object":      openaiModel.Object,
+			"openai_owned_by":    openaiModel.OwnedBy,
+		},
+	}
+}
+
+// verifyModelExistsFromList verifies if a model exists in a given models slice
+func (mc *ModelCache) verifyModelExistsFromList(models []models.OpenAIModel, modelName string) bool {
+	for _, model := range models {
+		if model.ID == modelName {
+			log.Debugf("Model verification successful for %s", modelName)
+			return true
+		}
+	}
+	log.Debugf("Model verification failed for %s: model not found in current backend models", modelName)
+	return false
+}
+
+const familyPrefixLength = 3
+
+// extractFamily returns a string representing the "family" of a model based on its name.
+// The function extracts the first three characters of the modelName as the family prefix,
+// which is a simple heuristic and may not always correspond to a meaningful family.
+// If the modelName is shorter than three characters, it returns "unknown".
+// This logic can be enhanced to use more sophisticated family detection if needed.
+func extractFamily(modelName string) string {
+	// Simple extraction - could be enhanced
+	if len(modelName) > familyPrefixLength {
+		return modelName[:familyPrefixLength]
+	}
+	return "unknown"
 }
