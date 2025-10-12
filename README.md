@@ -1,108 +1,234 @@
-# Oai2Ollama
+# Oai2Ollama Go
 
-This is a CLI tool that starts a server that wraps an OpenAI-compatible API and expose an Ollama-compatible API,
-which is useful for providing custom models for coding agents that don't support custom OpenAI APIs but do support Ollama
-(like GitHub Copilot for VS Code).
+A high-performance Go implementation of Oai2Ollama that provides Ollama API compatibility for OpenAI-compatible backends.
 
-## Usage
+## 🚀 Features
 
-### with Python
+- **🔄 API Compatibility**: Complete Ollama API compatibility layer
+- **🌐 Multiple Backends**: Support for OpenAI and other OpenAI-compatible APIs
+- **🏷️ Model Prefixing**: Automatic model name prefixing to avoid conflicts
+- **📊 Streaming Support**: Full streaming support for real-time responses
+- **⚡ High Performance**: Built with GoFiber for maximum performance
+- **🔧 Flexible Configuration**: YAML and environment variable configuration
+- **📝 Rich Examples**: Comprehensive examples and documentation
 
-You can run directly via `uvx` (if you have `uv` installed) or `pipx`:
+## 📋 Quick Start
 
-```sh
-uvx oai2ollama --help
+### Prerequisites
+
+- Go 1.21 or later
+- OpenAI API key (or other compatible API)
+
+### Installation
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/gemone/oai2ollama.git
+cd oai2ollama-go
 ```
 
-```text
-usage: oai2ollama [--api-key str] [--base-url HttpUrl] [--fetch-model-url HttpUrl] [--capabilities list[str]] [--models list[str]] [--host str]
-options:
-  --help, -h                    Show this help message and exit
-  --api-key str                 API key for authentication (required)
-  --base-url HttpUrl            Base URL for the OpenAI-compatible API (required)
-  --fetch-model-url HttpUrl     Alternative URL for fetching models (optional)
-  --capabilities, -c list[str]  Extra capabilities to mark the model as supporting
-  --models, -m list[str]        Extra models to include in the /api/tags response
-  --host str                    IP / hostname for the API server (default: localhost)
+2. Install dependencies:
+
+```bash
+make deps
 ```
 
-> [!TIP]
-> To mark the model as supporting certain capabilities, you can use the `--capabilities` (or `-c`) option with a list of strings. For example, the following two syntaxes are supported:
->
-> `oai2ollama -c tools` or `oai2ollama --capabilities tools`
->
-> `oai2ollama -c tools -c vision` or `oai2ollama --capabilities -c tools,vision`
->
-> To support models that are not returned by the `/models` endpoint, use the `--models` (or `-m`) option to add them to the `/api/tags` response:
->
-> `oai2ollama -m model1 -m model2` or `oai2ollama -m model1,model2`
->
-> Capabilities currently [used by Ollama](https://github.com/ollama/ollama/blob/main/types/model/capability.go#L6-L11) are:
-> `tools`, `insert`, `vision`, `embedding`, `thinking` and `completion`. We always include `completion`.
+3. Configure your API key:
 
-Or you can use a `.env` file to set these options:
-
-```properties
-OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=your_base_url
-FETCH_MODEL_URL=your_alternative_model_url
-HOST=0.0.0.0
-CAPABILITIES=["vision","thinking"]
-MODELS=["custom-model1","custom-model2"]
+```bash
+make config
+# Edit configs/config.yaml and replace 'sk-your-openai-api-key-here' with your actual API key
 ```
 
-> [!WARNING]
-> The option name `capacities` is deprecated. Use `capabilities` instead. The old name still works for now but will emit a deprecation warning.
+4. Build and run:
 
-## New Features
-
-### Alternative Model URL Support
-
-You can now specify an alternative URL for fetching models using the `--fetch-model-url` option or `FETCH_MODEL_URL` environment variable. This is useful when:
-
-- Your model list is available from a different endpoint than your chat completion API
-- You want to use a dedicated model service for model discovery
-- You need fallback model sources
-
-**Usage:**
-
-```sh
-oai2ollama --fetch-model-url https://models.example.com/v1 --base-url https://chat.example.com/v1
+```bash
+make run
 ```
 
-**Fallback Behavior:**
+Or run in development mode:
 
-- The system will first try to fetch models from `FETCH_MODEL_URL` if provided
-- If that fails, it will fall back to `BASE_URL`
-- If both fail, it will only return the models specified via `--models` parameter
-- Chat completions always use `BASE_URL` regardless of where models were fetched from
-
-### with Docker
-
-First, build the image:
-
-```sh
-docker build -t oai2ollama .
+```bash
+make dev
 ```
 
-Then, run the container with your credentials:
+### Basic Usage
 
-```sh
-docker run -p 11434:11434 \
-  -e OPENAI_API_KEY="your_api_key" \
-  -e OPENAI_BASE_URL="your_base_url" \
-  -e FETCH_MODEL_URL="your_alternative_model_url" \
-  oai2ollama
+#### List Models
+
+```bash
+curl http://localhost:11434/api/tags
 ```
 
-Or you can pass these as command line arguments:
+#### Chat Completion
 
-```sh
-docker run -p 11434:11434 oai2ollama --api-key your_api_key --base-url your_base_url --fetch-model-url your_alternative_model_url
+```bash
+curl -X POST http://localhost:11434/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'
 ```
 
-To have the server listen on a different host, like all IPv6 interfaces, use the `--host` argument:
+#### Streaming Chat
 
-```sh
-docker run -p 11434:11434 oai2ollama --host "::"
+```bash
+curl -X POST http://localhost:11434/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4",
+    "messages": [
+      {"role": "user", "content": "Tell me a story"}
+    ],
+    "stream": true
+  }'
 ```
+
+## 🛠️ Configuration
+
+### Config File (`configs/config.yaml`)
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 11434
+  debug: false
+
+backends:
+  - name: "openai"
+    api_key: "sk-your-openai-api-key-here" # 替换为您的实际密钥
+    base_url: "https://api.openai.com/v1"
+    enabled: true
+    timeout: 30
+    priority: 1
+    model_prefix:
+      enabled: true
+      prefix: "openai"
+      separator: "/"
+
+models:
+  - name: "*"
+    backend: "openai"
+    capabilities: ["completion", "tools"]
+    enabled: true
+```
+
+所有配置都在 `configs/config.yaml` 文件中管理，包括 API 密钥。
+
+## 🎯 Model Prefixing
+
+Oai2Ollama Go automatically adds prefixes to model names to prevent conflicts when using multiple backends:
+
+- **OpenAI models**: `openai/gpt-4`, `openai/gpt-3.5-turbo`
+- **Custom backends**: Use configurable prefixes like `claude/claude-3-sonnet`
+
+## 📚 API Reference
+
+### Ollama Compatible Endpoints
+
+| Endpoint          | Method | Description              |
+| ----------------- | ------ | ------------------------ |
+| `/api/tags`       | GET    | List available models    |
+| `/api/chat`       | POST   | Chat with a model        |
+| `/api/generate`   | POST   | Generate text completion |
+| `/api/embeddings` | POST   | Generate embeddings      |
+| `/api/version`    | GET    | Get version info         |
+| `/api/ps`         | GET    | Show running models      |
+| `/api/pull`       | POST   | Pull a model (mock)      |
+| `/api/delete`     | DELETE | Delete a model (mock)    |
+
+### Response Format
+
+All responses follow the standard Ollama API format, ensuring compatibility with existing tools and applications.
+
+## 🧪 Testing
+
+Run the test script to verify functionality:
+
+```bash
+make test
+# or
+./scripts/test.sh
+```
+
+## 🏗️ Development
+
+### Build
+
+```bash
+make build
+```
+
+### Run in Development
+
+```bash
+make dev
+```
+
+### Run Tests
+
+```bash
+make test
+```
+
+### Build for Multiple Platforms
+
+```bash
+make build-all
+```
+
+### Code Quality
+
+```bash
+make fmt    # Format code
+make lint   # Lint code
+```
+
+## 📁 Project Structure
+
+```
+oai2ollama-go/
+├── cmd/oai2ollama/          # Application entry point
+├── internal/
+│   ├── config/              # Configuration management
+│   ├── handlers/            # HTTP handlers
+│   ├── models/              # Data models
+│   └── services/            # Business logic
+├── pkg/
+│   ├── client/              # API clients
+│   └── utils/               # Utilities
+├── configs/                 # Configuration files
+├── scripts/                 # Helper scripts
+└── docs/                    # Documentation
+```
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🔗 Links
+
+- [Original Project](https://github.com/gemone/oai2ollama)
+- [OpenAI API Documentation](https://platform.openai.com/docs)
+- [Ollama API Documentation](https://docs.ollama.com/api)
+- [GoFiber Framework](https://docs.gofiber.io/)
+
+## 🙏 Acknowledgments
+
+- Original oai2ollama project for the concept and API design
+- OpenAI for providing the powerful models
+- Ollama team for the excellent API design
+- GoFiber team for the amazing web framework
+

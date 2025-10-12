@@ -10,3 +10,6 @@ build/
 
 .env*
 *.db
+/configs/*
+!/configs/config.example.yaml
+bin/
