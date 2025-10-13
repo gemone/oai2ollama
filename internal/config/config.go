@@ -8,11 +8,11 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Backends  []BackendConfig `mapstructure:"backends"`
-	Models    []ModelConfig   `mapstructure:"models"`
-	Logging   LoggingConfig   `mapstructure:"logging"`
-	Database  DatabaseConfig  `mapstructure:"database"`
+	Server   ServerConfig    `mapstructure:"server"`
+	Backends []BackendConfig `mapstructure:"backends"`
+	Models   []ModelConfig   `mapstructure:"models"`
+	Logging  LoggingConfig   `mapstructure:"logging"`
+	Database DatabaseConfig  `mapstructure:"database"`
 }
 
 type ServerConfig struct {
@@ -24,14 +24,14 @@ type ServerConfig struct {
 }
 
 type BackendConfig struct {
-	Name         string             `mapstructure:"name"`
-	APIKey       string             `mapstructure:"api_key"`
-	BaseURL      string             `mapstructure:"base_url"`
-	ModelURL     string             `mapstructure:"model_url"`
-	Enabled      bool               `mapstructure:"enabled"`
-	Timeout      int                `mapstructure:"timeout"`
-	Priority     int                `mapstructure:"priority"`
-	ModelPrefix  *ModelPrefixConfig `mapstructure:"model_prefix"`
+	Name          string               `mapstructure:"name"`
+	APIKey        string               `mapstructure:"api_key"`
+	BaseURL       string               `mapstructure:"base_url"`
+	ModelURL      string               `mapstructure:"model_url"`
+	Enabled       bool                 `mapstructure:"enabled"`
+	Timeout       int                  `mapstructure:"timeout"`
+	Priority      int                  `mapstructure:"priority"`
+	ModelPrefix   *ModelPrefixConfig   `mapstructure:"model_prefix"`
 	DefaultPrompt *DefaultPromptConfig `mapstructure:"default_prompt"`
 }
 
@@ -48,12 +48,19 @@ type DefaultPromptConfig struct {
 }
 
 type ModelConfig struct {
-	Name         string   `mapstructure:"name"`
-	Backend      string   `mapstructure:"backend"`
-	Capabilities []string `mapstructure:"capabilities"`
-	Enabled      bool     `mapstructure:"enabled"`
-	OriginalName string   `mapstructure:"original_name"`
-	DisplayName  string   `mapstructure:"display_name"`
+	Name               string          `mapstructure:"name"`
+	Backend            string          `mapstructure:"backend"`
+	Capabilities       []string        `mapstructure:"capabilities"`
+	Enabled            bool            `mapstructure:"enabled"`
+	OriginalName       string          `mapstructure:"original_name"`
+	DisplayName        string          `mapstructure:"display_name"`
+	MaxTokens          *int            `mapstructure:"max_tokens,omitempty"`
+	DefaultTemperature *float64        `mapstructure:"default_temperature,omitempty"`
+	DefaultTopP        *float64        `mapstructure:"default_top_p,omitempty"`
+	Temperature        *ParameterRange `mapstructure:"temperature,omitempty"`
+	TopP               *ParameterRange `mapstructure:"top_p,omitempty"`
+	PresencePenalty    *ParameterRange `mapstructure:"presence_penalty,omitempty"`
+	FrequencyPenalty   *ParameterRange `mapstructure:"frequency_penalty,omitempty"`
 }
 
 type LoggingConfig struct {
@@ -67,9 +74,15 @@ type LoggingConfig struct {
 }
 
 type DatabaseConfig struct {
-	Path             string `mapstructure:"path"`
-	MaxConnections   int    `mapstructure:"max_connections"`
+	Path              string `mapstructure:"path"`
+	MaxConnections    int    `mapstructure:"max_connections"`
 	ConnectionTimeout int    `mapstructure:"connection_timeout"`
+}
+
+type ParameterRange struct {
+	Enabled bool    `mapstructure:"enabled"`
+	Min     float64 `mapstructure:"min"`
+	Max     float64 `mapstructure:"max"`
 }
 
 var GlobalConfig *Config
@@ -138,6 +151,7 @@ func setDefaults() {
 	viper.SetDefault("database.path", "metrics.db")
 	viper.SetDefault("database.max_connections", 10)
 	viper.SetDefault("database.connection_timeout", 30)
+
 }
 
 func validate(config *Config) error {
@@ -241,4 +255,45 @@ func GetDefaultPromptForBackend(backendName string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func GetModelConfig(modelName string) (*ModelConfig, bool) {
+	if GlobalConfig == nil {
+		return nil, false
+	}
+
+	for _, model := range GlobalConfig.Models {
+		if model.Name == modelName && model.Enabled {
+			return &model, true
+		}
+	}
+	return nil, false
+}
+
+func GetParameterRangeForModel(modelName, parameterType string) (*ParameterRange, bool) {
+	modelConfig, exists := GetModelConfig(modelName)
+	if !exists {
+		return nil, false
+	}
+
+	switch parameterType {
+	case "temperature":
+		if modelConfig.Temperature != nil {
+			return modelConfig.Temperature, true
+		}
+	case "top_p":
+		if modelConfig.TopP != nil {
+			return modelConfig.TopP, true
+		}
+	case "presence_penalty":
+		if modelConfig.PresencePenalty != nil {
+			return modelConfig.PresencePenalty, true
+		}
+	case "frequency_penalty":
+		if modelConfig.FrequencyPenalty != nil {
+			return modelConfig.FrequencyPenalty, true
+		}
+	}
+
+	return nil, false
 }

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -55,12 +57,9 @@ func (h *OllamaHandler) ListModels(c *fiber.Ctx) error {
 
 // POST /api/chat - Chat completion
 func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
-	// Add debug logging at function start
-	log.Debug("Chat handler called")
-
+	// Parse Ollama request
 	var request models.OllamaChatRequest
 	if err := c.BodyParser(&request); err != nil {
-		log.Debugf("BodyParser failed: %v", err)
 		return c.Status(400).JSON(models.ErrorResponse{
 			Error: models.APIError{
 				Message: "Invalid request format",
@@ -70,117 +69,57 @@ func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Debugf("Request Body: %s", string(c.Body()))
-
-	log.Debugf("Parsed request: Model=%s, MessagesCount=%d, Stream=%t, Think=%t",
-		request.Model, len(request.Messages), request.Stream, request.Think)
-
-	// Validate request
-	if request.Model == "" {
-		log.Debug("Model validation failed - empty model")
-		return c.Status(400).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: "Model is required",
-				Type:    "invalid_request_error",
-				Code:    "missing_model",
-				Param:   "model",
-			},
-		})
-	}
-
-	if len(request.Messages) == 0 {
-		log.Debug("Messages validation failed - no messages")
-		return c.Status(400).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: "Messages are required",
-				Type:    "invalid_request_error",
-				Code:    "missing_messages",
-				Param:   "messages",
-			},
-		})
-	}
-
-	// Get backend for this model using cache
-	log.Debugf("Looking up backend for model: %s", request.Model)
-	backendName, err := h.modelCache.GetBackendForModel(request.Model)
-	if err != nil {
-		log.Debugf("Backend lookup failed: %v", err)
-		return c.Status(404).JSON(models.OllamaErrorResponse{
-			Error: fmt.Sprintf("Model not found: %s", request.Model),
-		})
-	}
-
-	log.Debugf("Found backend: %s", backendName)
-
-	backendClient, exists := h.backendClients[backendName]
-	if !exists {
-		log.Debugf("Backend client not found for: %s", backendName)
-		return c.Status(503).JSON(models.OllamaErrorResponse{
-			Error: fmt.Sprintf("Backend not available: %s", backendName),
-		})
-	}
-
-	log.Debug("Backend client found, proceeding with request conversion")
-
-	// Parse model name to get original name for backend call
-	log.Debugf("Parsing model name: %s", request.Model)
-	if h.converter == nil {
-		log.Error("Model converter is nil")
-		return c.Status(500).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: "Internal server error: model converter not initialized",
-				Type:    "internal_error",
-				Code:    "internal_error",
-			},
-		})
-	}
-	modelParse, err := h.converter.ParseModelName(request.Model)
-	if err != nil {
-		log.Debugf("Model parsing failed: %v", err)
-		return c.Status(400).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: fmt.Sprintf("Invalid model name: %s", request.Model),
-				Type:    "invalid_request_error",
-				Code:    "invalid_model",
-				Param:   "model",
-			},
-		})
-	}
-
-	log.Debugf("Model parse result: Backend=%s, OriginalName=%s, DisplayName=%s",
-		modelParse.Backend, modelParse.OriginalName, modelParse.DisplayName)
-
 	// Convert Ollama request to OpenAI format
-	log.Debug("Converting request to OpenAI format")
+	openAIRequest := h.convertOllamaToOpenAIRequest(&request, request.Model)
 
-	// Add nil check for Options before accessing fields
-	var temperature, topP *float64
-	var maxTokens *int
-	if request.Options != nil {
-		temperature = request.Options.Temperature
-		topP = request.Options.TopP
-		maxTokens = request.Options.NumPredict
-		log.Debugf("Options found - Temperature: %v, TopP: %v, NumPredict: %v",
-			temperature, topP, maxTokens)
-	} else {
-		log.Debug("No options provided, using defaults")
-	}
+	// Process using universal function (return Ollama format)
+	return h.processChatCompletion(c, openAIRequest, false)
+}
 
+// convertOllamaToOpenAIRequest converts Ollama chat request to OpenAI format
+func (h *OllamaHandler) convertOllamaToOpenAIRequest(request *models.OllamaChatRequest, originalModel string) *models.OpenAIChatCompletionRequest {
 	openAIRequest := &models.OpenAIChatCompletionRequest{
-		Model:       modelParse.OriginalName, // Use original name for backend
-		Messages:    make([]models.OpenAIMessage, len(request.Messages)),
-		Stream:      request.Stream,
-		Temperature: temperature,
-		TopP:        topP,
-		MaxTokens:   maxTokens,
+		Model:    originalModel, // Use original name for backend API call
+		Messages: make([]models.OpenAIMessage, len(request.Messages)),
+		Stream:   request.Stream,
 	}
 
-	log.Debugf("Converting %d messages", len(request.Messages))
+	// Add parameters only if they are not nil/empty
+	if request.Options != nil {
+		// Only add temperature if it's not nil
+		if request.Options.Temperature != nil {
+			openAIRequest.Temperature = request.Options.Temperature
+		}
+
+		// Only add top_p if it's not nil
+		if request.Options.TopP != nil {
+			openAIRequest.TopP = request.Options.TopP
+		}
+
+		// Only add max_tokens if it's not nil
+		if request.Options.NumPredict != nil {
+			openAIRequest.MaxTokens = request.Options.NumPredict
+		}
+
+		// Handle stop sequences
+		if request.Options.Stop != nil && len(request.Options.Stop) > 0 {
+			openAIRequest.Stop = request.Options.Stop
+		}
+
+		// Handle presence penalty
+		if request.Options.PresencePenalty != nil {
+			openAIRequest.PresencePenalty = request.Options.PresencePenalty
+		}
+
+		// Handle frequency penalty
+		if request.Options.FrequencyPenalty != nil {
+			openAIRequest.FrequencyPenalty = request.Options.FrequencyPenalty
+		}
+	}
+
+	// Convert messages
 	for i, msg := range request.Messages {
-		log.Debugf("Processing message %d: Role=%s, Content=%v",
-			i, msg.Role, msg.Content)
 		openAIRequest.Messages[i] = models.OllamaToOpenAIMessage(msg)
-		log.Debugf("Converted message %d successfully", i)
 	}
 
 	// Convert Ollama think parameter to OpenAI thinking format
@@ -188,190 +127,9 @@ func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 		openAIRequest.Thinking = &models.OpenAIThinking{
 			Type: "enabled",
 		}
-		log.Debug("Think parameter detected, converted to thinking format")
 	}
 
-	// Add nil check for Options
-	log.Debug("Checking request.Options")
-	if request.Options != nil {
-		log.Debug("Options is not nil, accessing fields")
-		if request.Options.Temperature != nil {
-			log.Debugf("Temperature: %f", *request.Options.Temperature)
-		}
-		if request.Options.TopP != nil {
-			log.Debugf("TopP: %f", *request.Options.TopP)
-		}
-		if request.Options.NumPredict != nil {
-			log.Debugf("NumPredict: %d", *request.Options.NumPredict)
-		}
-	} else {
-		log.Debug("WARNING: request.Options is nil")
-	}
-
-	// Handle streaming
-	if request.Stream {
-		log.Debug("Handling streaming request")
-		return h.handleStreamingChat(c, backendClient, openAIRequest)
-	}
-
-	// Handle non-streaming
-	log.Debug("Handling non-streaming request")
-	log.Debug("Calling backendClient.ChatCompletion")
-	response, err := backendClient.ChatCompletion(openAIRequest)
-	if err != nil {
-		log.Debugf("ChatCompletion failed: %v", err)
-		return c.Status(500).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: fmt.Sprintf("Chat completion failed: %v", err),
-				Type:    "api_error",
-				Code:    "chat_completion_failed",
-			},
-		})
-	}
-
-	log.Debug("ChatCompletion succeeded, checking response")
-
-	// Add nil checks before accessing response fields
-	if response == nil {
-		log.Debug("ERROR: response is nil")
-		return c.Status(500).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: "Backend returned nil response",
-				Type:    "api_error",
-				Code:    "nil_response",
-			},
-		})
-	}
-
-	log.Debug("Response is not nil, checking Choices")
-	if len(response.Choices) == 0 {
-		log.Debug("ERROR: response.Choices is empty")
-		return c.Status(500).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: "Backend returned empty choices",
-				Type:    "api_error",
-				Code:    "empty_choices",
-			},
-		})
-	}
-
-	log.Debugf("Choices length: %d", len(response.Choices))
-
-	// Check the first choice for validity
-	firstChoice := response.Choices[0]
-	contentStr, ok := firstChoice.Message.Content.(string)
-	if (!ok || len(contentStr) == 0) && firstChoice.Message.Content == nil {
-		log.Debug("ERROR: response.Choices[0] has empty or nil content")
-		return c.Status(500).JSON(models.ErrorResponse{
-			Error: models.APIError{
-				Message: "Backend returned choice with empty content",
-				Type:    "api_error",
-				Code:    "empty_content",
-			},
-		})
-	}
-
-	log.Debug("First choice is valid, checking Message")
-	if response.Choices[0].Message.Content == nil {
-		log.Debug("WARNING: response.Choices[0].Message.Content is nil")
-	}
-
-	// Convert OpenAI response to Ollama format
-	log.Debug("Converting response to Ollama format")
-	ollamaResponse := &models.OllamaChatResponse{
-		Model:     request.Model,
-		CreatedAt: time.Now(),
-		Message:   models.OpenAIToOllamaMessage(response.Choices[0].Message),
-		Done:      true,
-	}
-
-	log.Debug("Response conversion completed")
-
-	// Add usage information if available
-	if response.Usage != nil {
-		log.Debugf("Adding usage info: PromptTokens=%d, CompletionTokens=%d",
-			response.Usage.PromptTokens, response.Usage.CompletionTokens)
-		ollamaResponse.PromptEvalCount = response.Usage.PromptTokens
-		ollamaResponse.EvalCount = response.Usage.CompletionTokens
-	} else {
-		log.Debug("No usage information available")
-	}
-
-	log.Debug("Returning JSON response")
-	return c.JSON(ollamaResponse)
-}
-
-func (h *OllamaHandler) handleStreamingChat(c *fiber.Ctx, backendClient models.BackendClient, request *models.OpenAIChatCompletionRequest) error {
-	log.Debug("Streaming chat handler started")
-
-	// Set SSE headers
-	c.Set("Content-Type", "text/event-stream")
-	c.Set("Cache-Control", "no-cache")
-	c.Set("Connection", "keep-alive")
-	c.Set("Access-Control-Allow-Origin", "*")
-
-	log.Debug("SSE headers set, starting stream")
-
-	// Start streaming
-	ch, err := backendClient.StreamChatCompletion(request)
-	if err != nil {
-		log.Debugf("StreamChatCompletion failed: %v", err)
-		return c.Status(500).JSON(models.OllamaErrorResponse{
-			Error: fmt.Sprintf("Failed to start stream: %v", err),
-		})
-	}
-
-	log.Debug("Stream started successfully, reading from channel")
-
-	// Stream responses
-	for response := range ch {
-		log.Debug("Received streaming response")
-
-		// Add checks for streaming response
-		if len(response.Choices) == 0 {
-			log.Debug("WARNING: Received streaming response with no choices, skipping")
-			continue
-		}
-
-		// Check if Delta exists and has content
-		if response.Choices[0].Delta == nil {
-			log.Debug("WARNING: Received streaming response with nil delta, skipping")
-			continue
-		}
-
-		log.Debug("Converting streaming response to Ollama format")
-
-		// Convert to Ollama format
-		ollamaResponse := &models.OllamaChatResponse{
-			Model:     request.Model,
-			CreatedAt: time.Now(),
-			Message:   models.OpenAIToOllamaMessage(*response.Choices[0].Delta),
-			Done:      false,
-		}
-
-		// Send as SSE
-		data := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(ollamaResponse))
-		c.WriteString(data)
-
-		if len(response.Choices) > 0 && response.Choices[0].FinishReason != "" {
-			log.Debugf("Streaming finished with reason: %s", response.Choices[0].FinishReason)
-			// Send final chunk
-			finalResponse := &models.OllamaChatResponse{
-				Model:     request.Model,
-				CreatedAt: time.Now(),
-				Done:      true,
-			}
-			finalData := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(finalResponse))
-			c.WriteString(finalData)
-			break
-		}
-	}
-
-	// Send done signal
-	log.Debug("Sending streaming done signal")
-	c.WriteString("data: [DONE]\n\n")
-
-	return nil
+	return openAIRequest
 }
 
 // POST /api/generate - Text generation
@@ -491,7 +249,7 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 	c.Set("Access-Control-Allow-Origin", "*")
 
 	// Start streaming (thinking detection is handled inside the client)
-	ch, err := backendClient.StreamChatCompletion(request)
+	ch, err := backendClient.StreamChatCompletion(c.Context(), request)
 
 	if err != nil {
 		return c.Status(500).JSON(models.OllamaErrorResponse{
@@ -875,6 +633,443 @@ func mustMarshalJSON(v interface{}) []byte {
 		return []byte("{}")
 	}
 	return data
+}
+
+// Universal chat completion processing function
+func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.OpenAIChatCompletionRequest, returnOpenAIFormat bool) error {
+	log.Debug("ProcessChatCompletion called")
+
+	log.Debugf("Parsed request: Model=%s, MessagesCount=%d, Stream=%t",
+		request.Model, len(request.Messages), request.Stream)
+
+	// Validate request
+	if request.Model == "" {
+		log.Debug("Model validation failed - empty model")
+		if returnOpenAIFormat {
+			return c.Status(400).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: "Model is required",
+					Type:    "invalid_request_error",
+					Code:    "missing_model",
+					Param:   "model",
+				},
+			})
+		} else {
+			return c.Status(400).JSON(models.OllamaErrorResponse{
+				Error: "Model name is required",
+			})
+		}
+	}
+
+	if len(request.Messages) == 0 {
+		log.Debug("Messages validation failed - no messages")
+		if returnOpenAIFormat {
+			return c.Status(400).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: "Messages are required",
+					Type:    "invalid_request_error",
+					Code:    "missing_messages",
+					Param:   "messages",
+				},
+			})
+		} else {
+			return c.Status(400).JSON(models.OllamaErrorResponse{
+				Error: "Messages are required",
+			})
+		}
+	}
+
+	// Get backend for this model using cache
+	log.Debugf("Looking up backend for model: %s", request.Model)
+	backendName, err := h.modelCache.GetBackendForModel(request.Model)
+	if err != nil {
+		log.Debugf("Backend lookup failed: %v", err)
+		if returnOpenAIFormat {
+			return c.Status(404).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: fmt.Sprintf("Model not found: %s", request.Model),
+					Type:    "invalid_request_error",
+					Code:    "model_not_found",
+					Param:   "model",
+				},
+			})
+		} else {
+			return c.Status(404).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Model not found: %s", request.Model),
+			})
+		}
+	}
+
+	log.Debugf("Found backend: %s", backendName)
+
+	backendClient, exists := h.backendClients[backendName]
+	if !exists {
+		log.Debugf("Backend client not found for: %s", backendName)
+		if returnOpenAIFormat {
+			return c.Status(503).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: fmt.Sprintf("Backend not available: %s", backendName),
+					Type:    "api_error",
+					Code:    "backend_unavailable",
+				},
+			})
+		} else {
+			return c.Status(503).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Backend not available: %s", backendName),
+			})
+		}
+	}
+
+	log.Debug("Backend client found, proceeding with request")
+
+	// Parse model name to get original name for backend call
+	log.Debugf("Parsing model name: %s", request.Model)
+	if h.converter == nil {
+		log.Error("Model converter is nil")
+		if returnOpenAIFormat {
+			return c.Status(500).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: "Internal server error: model converter not initialized",
+					Type:    "internal_error",
+					Code:    "internal_error",
+				},
+			})
+		} else {
+			return c.Status(500).JSON(models.OllamaErrorResponse{
+				Error: "Internal server error: model converter not initialized",
+			})
+		}
+	}
+
+	modelParse, err := h.converter.ParseModelName(request.Model)
+	if err != nil {
+		log.Debugf("Model parsing failed: %v", err)
+		if returnOpenAIFormat {
+			return c.Status(400).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: fmt.Sprintf("Invalid model name: %s", request.Model),
+					Type:    "invalid_request_error",
+					Code:    "invalid_model",
+					Param:   "model",
+				},
+			})
+		} else {
+			return c.Status(400).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Invalid model name: %s", request.Model),
+			})
+		}
+	}
+
+	log.Debugf("Model parse result: Backend=%s, OriginalName=%s, DisplayName=%s",
+		modelParse.Backend, modelParse.OriginalName, modelParse.DisplayName)
+
+	// Store original prefixed model name for response
+	originalPrefixedModel := request.Model
+	// Update request model to use original name for backend API call
+	request.Model = modelParse.OriginalName
+
+	// Handle streaming
+	if request.Stream {
+		log.Debug("Handling streaming request")
+		return h.handleStreamingChatCompletions(c, backendClient, request, returnOpenAIFormat, originalPrefixedModel)
+	}
+
+	// Handle non-streaming
+	log.Debug("Handling non-streaming request")
+	response, err := backendClient.ChatCompletion(request)
+	if err != nil {
+		log.Debugf("ChatCompletion failed: %v", err)
+		if returnOpenAIFormat {
+			return c.Status(500).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: fmt.Sprintf("Chat completion failed: %v", err),
+					Type:    "api_error",
+					Code:    "chat_completion_failed",
+				},
+			})
+		} else {
+			return c.Status(500).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Generation failed: %v", err),
+			})
+		}
+	}
+
+	log.Debug("ChatCompletion succeeded")
+
+	if returnOpenAIFormat {
+		// For OpenAI format, restore the original model name in response
+		response.Model = originalPrefixedModel
+		return c.JSON(response)
+	} else {
+		// Convert OpenAI response to Ollama format
+		ollamaResponse := &models.OllamaChatResponse{
+			Model:     originalPrefixedModel, // Use prefixed model for Ollama format
+			CreatedAt: time.Now(),
+			Message:   models.OpenAIToOllamaMessage(response.Choices[0].Message),
+			Done:      true,
+		}
+
+		// Add usage information if available
+		if response.Usage != nil {
+			ollamaResponse.PromptEvalCount = response.Usage.PromptTokens
+			ollamaResponse.EvalCount = response.Usage.CompletionTokens
+		}
+
+		return c.JSON(ollamaResponse)
+	}
+}
+
+// POST /v1/chat/completions - OpenAI compatible chat completions
+func (h *OllamaHandler) ChatCompletions(c *fiber.Ctx) error {
+	log.Debug("ChatCompletions handler called")
+
+	var request models.OpenAIChatCompletionRequest
+	if err := c.BodyParser(&request); err != nil {
+		log.Debugf("BodyParser failed: %v", err)
+		return c.Status(400).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Invalid request format",
+				Type:    "invalid_request_error",
+				Code:    "invalid_format",
+			},
+		})
+	}
+
+	log.Debugf("Request Body: %s", string(c.Body()))
+
+	// Use universal processing function with OpenAI format
+	return h.processChatCompletion(c, &request, true)
+}
+
+func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClient models.BackendClient, request *models.OpenAIChatCompletionRequest, returnOpenAIFormat bool, prefixedModel ...string) error {
+	// Generate unique request ID for tracking
+	requestID := fmt.Sprintf("stream-%d", time.Now().UnixNano())
+	log.Debugf("[%s] Starting streaming request for model: %s", requestID, request.Model)
+
+	// Set proper SSE headers
+	c.Set("Content-Type", "text/event-stream; charset=utf-8")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("Access-Control-Allow-Origin", "*")
+	c.Set("Access-Control-Allow-Headers", "Cache-Control")
+	c.Set("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	// Get the underlying fasthttp response
+	resp := c.Response()
+	// Ensure no content encoding
+	resp.Header.Del("Content-Encoding")
+
+	// Determine which model name to use in responses
+	modelInResponse := request.Model
+	if len(prefixedModel) > 0 && !returnOpenAIFormat {
+		modelInResponse = prefixedModel[0] // Use prefixed model for Ollama format
+	}
+
+	// Create a cancellable context for the backend request
+	ctx, cancel := context.WithCancel(c.Context())
+
+	// Check for client disconnection in a separate goroutine
+	go func() {
+		<-c.Context().Done() // Wait for client to disconnect
+		log.Debugf("[%s] Client disconnected, cancelling backend request", requestID)
+		cancel()
+	}()
+
+	// Start streaming with cancellable context
+	log.Debugf("[%s] Initiating backend streaming request", requestID)
+	ch, err := backendClient.StreamChatCompletion(ctx, request)
+	if err != nil {
+		log.Debugf("[%s] Failed to start stream: %v", requestID, err)
+		if returnOpenAIFormat {
+			return c.Status(500).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: fmt.Sprintf("Failed to start stream: %v", err),
+					Type:    "api_error",
+					Code:    "stream_failed",
+				},
+			})
+		} else {
+			return c.Status(500).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Failed to start stream: %v", err),
+			})
+		}
+	}
+
+	log.Debugf("[%s] Backend streaming started successfully", requestID)
+
+	// Enable streaming mode for fasthttp
+	resp.SetBodyStreamWriter(func(w *bufio.Writer) {
+		// Stream responses
+		chunkCount := 0
+		streamEndedNormally := false
+
+		for {
+			select {
+			case <-ctx.Done():
+				// Context was cancelled (client disconnected)
+				log.Debugf("[%s] Streaming cancelled by client or context (processed %d chunks)", requestID, chunkCount)
+				return
+
+			case response, ok := <-ch:
+				if !ok {
+					// Channel closed, stream ended normally
+					log.Debugf("[%s] Backend stream channel closed (processed %d chunks)", requestID, chunkCount)
+					streamEndedNormally = true
+					goto streamEnded
+				}
+
+				chunkCount++
+				if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+					log.Debugf("[%s] Received chunk %d from backend", requestID, chunkCount)
+				}
+
+				var data string
+				if returnOpenAIFormat {
+					// For OpenAI format, create a copy and restore the original model name
+					responseCopy := response
+					if len(prefixedModel) > 0 {
+						responseCopy.Model = prefixedModel[0]
+					}
+					// Send as SSE in OpenAI format
+					data = fmt.Sprintf("data: %s\n\n", mustMarshalJSON(responseCopy))
+				} else {
+					// Convert to Ollama format for /api/chat compatibility
+					if len(response.Choices) > 0 && response.Choices[0].Delta != nil {
+						ollamaResponse := &models.OllamaChatResponse{
+							Model:     modelInResponse,
+							CreatedAt: time.Now(),
+							Message:   models.OpenAIToOllamaMessage(*response.Choices[0].Delta),
+							Done:      false,
+						}
+
+						data = fmt.Sprintf("data: %s\n\n", mustMarshalJSON(ollamaResponse))
+					} else {
+						// Skip if no delta content
+						continue
+					}
+				}
+
+				// Write data directly to stream
+				if _, err := w.WriteString(data); err != nil {
+					log.Debugf("[%s] Failed to write streaming response for chunk %d: %v", requestID, chunkCount, err)
+					return
+				}
+
+				// Flush to ensure immediate delivery to client
+				if err := w.Flush(); err != nil {
+					log.Debugf("[%s] Failed to flush streaming response for chunk %d: %v", requestID, chunkCount, err)
+					return
+				}
+
+				// If this is the final chunk, send done signal
+				if len(response.Choices) > 0 && response.Choices[0].FinishReason != "" {
+					log.Debugf("[%s] Received final chunk with finish reason: %s (total chunks: %d)",
+						requestID, response.Choices[0].FinishReason, chunkCount)
+
+					var doneData string
+					if returnOpenAIFormat {
+						// OpenAI format uses [DONE] marker
+						doneData = "data: [DONE]\n\n"
+					} else {
+						// Send final chunk for Ollama format
+						finalResponse := &models.OllamaChatResponse{
+							Model:     modelInResponse,
+							CreatedAt: time.Now(),
+							Done:      true,
+						}
+
+						doneData = fmt.Sprintf("data: %s\n\n", mustMarshalJSON(finalResponse))
+					}
+
+					if _, err := w.WriteString(doneData); err != nil {
+						log.Debugf("[%s] Failed to write final streaming response: %v", requestID, err)
+					} else {
+						// Final flush
+						w.Flush()
+					}
+					log.Debugf("[%s] Streaming completed successfully (total chunks: %d)", requestID, chunkCount)
+					return
+				}
+			}
+		}
+
+streamEnded:
+		// Handle case where stream ended normally but no chunks were processed
+		if streamEndedNormally && chunkCount == 0 {
+			log.Debugf("[%s] Stream ended with 0 chunks - falling back to non-streaming request", requestID)
+
+			// Make a non-streaming request to get the complete response
+			nonStreamingRequest := *request
+			nonStreamingRequest.Stream = false
+
+			response, err := backendClient.ChatCompletion(&nonStreamingRequest)
+			if err != nil {
+				log.Debugf("[%s] Fallback non-streaming request failed: %v", requestID, err)
+				// Send error response
+				if returnOpenAIFormat {
+					errorData := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(models.ErrorResponse{
+						Error: models.APIError{
+							Message: fmt.Sprintf("Streaming not supported and fallback failed: %v", err),
+							Type:    "api_error",
+							Code:    "streaming_fallback_failed",
+						},
+					}))
+					w.WriteString(errorData)
+				} else {
+					errorData := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(models.OllamaErrorResponse{
+						Error: fmt.Sprintf("Streaming not supported and fallback failed: %v", err),
+					}))
+					w.WriteString(errorData)
+				}
+				w.Flush()
+				return
+			}
+
+			// Stream the complete response as a single chunk
+			chunkCount = 1
+			if returnOpenAIFormat {
+				// For OpenAI format, restore the original model name
+				responseCopy := *response
+				if len(prefixedModel) > 0 {
+					responseCopy.Model = prefixedModel[0]
+				}
+				data := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(responseCopy))
+				if _, err := w.WriteString(data); err != nil {
+					log.Debugf("[%s] Failed to write fallback response: %v", requestID, err)
+				} else {
+					w.Flush()
+					log.Debugf("[%s] Sent fallback response as single chunk", requestID)
+				}
+
+				// Send done signal
+				doneData := "data: [DONE]\n\n"
+				if _, err := w.WriteString(doneData); err != nil {
+					log.Debugf("[%s] Failed to write fallback done signal: %v", requestID, err)
+				} else {
+					w.Flush()
+				}
+			} else {
+				// Convert to Ollama format
+				if len(response.Choices) > 0 {
+					ollamaResponse := &models.OllamaChatResponse{
+						Model:     modelInResponse,
+						CreatedAt: time.Now(),
+						Message:   models.OpenAIToOllamaMessage(response.Choices[0].Message),
+						Done:      true,
+					}
+					data := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(ollamaResponse))
+					if _, err := w.WriteString(data); err != nil {
+						log.Debugf("[%s] Failed to write fallback Ollama response: %v", requestID, err)
+					} else {
+						w.Flush()
+						log.Debugf("[%s] Sent fallback Ollama response as single chunk", requestID)
+					}
+				}
+			}
+		}
+	})
+
+	return nil
 }
 
 // Helper to validate prompt and apply default if needed

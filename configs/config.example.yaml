@@ -61,6 +61,21 @@ models:
     backend: "zai"
     capabilities: ["completion", "tools", "thinking"]
     enabled: true
+    # Default parameter ranges for auto-fetched models
+    temperature:
+      enabled: true
+      min: 0.0
+      max: 2.0
+    top_p:
+      enabled: true
+      min: 0.0
+      max: 1.0
+    presence_penalty:
+      min: -2.0
+      max: 2.0
+    frequency_penalty:
+      min: -2.0
+      max: 2.0
 
   # Custom model aliases - these will be added as additional entries if the original model exists in backend
   - name: "chat-glm4"  # Custom alias
@@ -68,12 +83,61 @@ models:
     original_name: "glm-4.5"  # Points to the actual model in backend
     capabilities: ["completion", "tools"]
     enabled: true
+    max_tokens: 8192
+    # Model-specific parameter ranges with enable switches
+    temperature:
+      enabled: true
+      min: 0.1
+      max: 1.5
+    top_p:
+      enabled: false  # Disable top_p for this model - external values will be ignored
+      min: 0.1
+      max: 0.9
+    presence_penalty:
+      min: -1.0
+      max: 1.0
+    frequency_penalty:
+      min: -1.0
+      max: 1.0
 
   - name: "advanced-glm"  # Another custom alias
     backend: "zai"
     original_name: "glm-4.5-air"
     capabilities: ["completion", "tools", "thinking"]
     enabled: true
+    max_tokens: 131072
+    # Model-specific parameter ranges for advanced model
+    temperature:
+      enabled: true
+      min: 0.0
+      max: 2.0
+    top_p:
+      enabled: true
+      min: 0.0
+      max: 1.0
+    presence_penalty:
+      min: -2.0
+      max: 2.0
+    frequency_penalty:
+      min: -2.0
+      max: 2.0
+
+  # Example model with both temperature and top_p disabled
+  - name: "restricted-model"
+    backend: "zai"
+    original_name: "glm-4-flash"
+    capabilities: ["completion"]
+    enabled: true
+    max_tokens: 4096
+    # Disable external parameter control for consistent behavior
+    temperature:
+      enabled: false  # External temperature values will be ignored
+      min: 0.5
+      max: 0.8
+    top_p:
+      enabled: false  # External top_p values will be ignored
+      min: 0.7
+      max: 0.9
 
   # Example of custom model that doesn't exist (will be skipped with warning after verification)
   - name: "nonexistent-model"
@@ -102,3 +166,4 @@ database:
   path: "metrics.db"
   max_connections: 10
   connection_timeout: 30
+

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -228,7 +229,7 @@ type ModelParseResult struct {
 type BackendClient interface {
 	GetModels() ([]OpenAIModel, error)
 	ChatCompletion(request *OpenAIChatCompletionRequest) (*OpenAIChatCompletionResponse, error)
-	StreamChatCompletion(request *OpenAIChatCompletionRequest) (<-chan OpenAIChatCompletionResponse, error)
+	StreamChatCompletion(ctx context.Context, request *OpenAIChatCompletionRequest) (<-chan OpenAIChatCompletionResponse, error)
 	GenerateEmbeddings(request *OllamaEmbeddingsRequest) (*OllamaEmbeddingsResponse, error)
 }
 

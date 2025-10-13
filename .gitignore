@@ -13,3 +13,4 @@ build/
 /configs/*
 !/configs/config.example.yaml
 bin/
+/logs/

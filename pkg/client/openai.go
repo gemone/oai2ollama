@@ -3,6 +3,7 @@ package client
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,11 +38,20 @@ func NewOpenAIClient(backendConfig *config.BackendConfig) *OpenAIClient {
 		debug = config.GlobalConfig.Server.Debug
 	}
 
-	// For streaming, we don't set a timeout on the HTTP client itself
-	// Instead, we'll handle timeout per chunk
+	// Use HTTP client with forced HTTP/1.1 to avoid HTTP/2 issues
+	client := &http.Client{
+		Timeout: 0, // No timeout for streaming, handle per request
+		Transport: &http.Transport{
+			ForceAttemptHTTP2: false, // Force HTTP/1.1 to avoid protocol issues
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 5,
+			IdleConnTimeout:     30 * time.Second,
+		},
+	}
+
 	return &OpenAIClient{
 		config:   backendConfig,
-		client:   &http.Client{Timeout: 0}, // No timeout for streaming
+		client:   client,
 		baseURL:  backendConfig.BaseURL,
 		modelURL: backendConfig.ModelURL,
 		apiKey:   backendConfig.APIKey,
@@ -184,11 +194,11 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	return &response, nil
 }
 
-func (c *OpenAIClient) StreamChatCompletion(request *models.OpenAIChatCompletionRequest) (<-chan models.OpenAIChatCompletionResponse, error) {
-	return c.StreamChatCompletionWithChunkTimeout(request)
+func (c *OpenAIClient) StreamChatCompletion(ctx context.Context, request *models.OpenAIChatCompletionRequest) (<-chan models.OpenAIChatCompletionResponse, error) {
+	return c.StreamChatCompletionWithChunkTimeout(ctx, request)
 }
 
-func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.OpenAIChatCompletionRequest) (<-chan models.OpenAIChatCompletionResponse, error) {
+func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(ctx context.Context, request *models.OpenAIChatCompletionRequest) (<-chan models.OpenAIChatCompletionResponse, error) {
 	url := fmt.Sprintf("%s/chat/completions", c.baseURL)
 
 	// Ensure streaming is enabled without modifying the original request
@@ -206,13 +216,13 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 	if c.debug {
 		log.Debugf("StreamChatCompletion Request: POST %s", url)
 		log.Debugf("StreamChatCompletion Request Body: %s", string(jsonData))
-		log.Debugf("StreamChatCompletion: Chunk timeout recalculation enabled")
+		log.Debug("StreamChatCompletion: Chunk timeout recalculation enabled")
 		if thinkingEnabled {
-			log.Debugf("StreamChatCompletion: Thinking mode detected (type: enabled)")
+			log.Debug("StreamChatCompletion: Thinking mode detected (type: enabled)")
 		}
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -233,6 +243,7 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 	if c.debug {
 		log.Debugf("StreamChatCompletion Response Status: %d", resp.StatusCode)
 		log.Debugf("StreamChatCompletion Response Headers: %+v", sanitizeHeadersForLogging(resp.Header))
+		log.Debug("StreamChatCompletion: Starting to read response body")
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -241,76 +252,60 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
 	}
 
+	
 	ch := make(chan models.OpenAIChatCompletionResponse)
 
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
 
+		if c.debug {
+			log.Debug("StreamChatCompletion: Starting goroutine to read SSE data")
+		}
+
+		reader := bufio.NewReader(resp.Body)
+
 		for {
-			// Calculate timeout for each chunk
-			var chunkTimeout time.Duration
-			if thinkingEnabled {
-				chunkTimeout = 0 // No timeout when thinking is enabled
-				if c.debug {
-					log.Debugf("StreamChatCompletion: Thinking mode enabled, no timeout for chunks")
-				}
-			} else {
-				chunkTimeout = c.calculateChunkTimeout()
-				if c.debug {
-					log.Debugf("StreamChatCompletion: Starting chunk read with timeout %v", chunkTimeout)
-				}
-			}
-
-			// Use a channel to implement per-chunk timeout
-			type readResult struct {
-				line string
-				err  error
-			}
-
-			resultChan := make(chan readResult, 1)
-
-			go func() {
-				line, err := readSSELine(resp.Body)
-				resultChan <- readResult{line: line, err: err}
-			}()
-
-			if thinkingEnabled {
-				// No timeout, just wait for result
-				result := <-resultChan
-				if result.err != nil {
-					if result.err == io.EOF {
-						if c.debug {
-							log.Debugf("StreamChatCompletion: EOF reached")
-						}
-						return
-					}
-					if c.debug {
-						log.Debugf("StreamChatCompletion error reading line: %v", result.err)
-					}
-					continue
-				}
-
-				if result.line == "" {
-					continue
-				}
-
-				if c.debug {
-					log.Debugf("StreamChatCompletion SSE Line: %s", result.line)
-				}
-
-				if result.line == "data: [DONE]" {
-					if c.debug {
-						log.Debugf("StreamChatCompletion: Received [DONE]")
+			select {
+			case <-ctx.Done():
+				log.Debug("StreamChatCompletion: Context cancelled, closing stream.")
+				return
+			default:
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					if err == io.EOF {
+						log.Debug("StreamChatCompletion: EOF reached")
+					} else {
+						log.Debugf("StreamChatCompletion error reading line: %v", err)
 					}
 					return
 				}
 
-				if !bytes.HasPrefix([]byte(result.line), []byte("data: ")) {
+				lineStr := strings.TrimSpace(string(line))
+				if c.debug {
+					log.Debugf("StreamChatCompletion Raw SSE Line: '%s'", lineStr)
+				}
+
+				if lineStr == "" {
 					continue
 				}
 
-				jsonData := bytes.TrimPrefix([]byte(result.line), []byte("data: "))
+				if c.debug {
+					log.Debugf("StreamChatCompletion SSE Line: %s", lineStr)
+				}
+
+				if lineStr == "data: [DONE]" {
+					if c.debug {
+						log.Debug("StreamChatCompletion: Received [DONE]")
+					}
+					return
+				}
+
+				if !strings.HasPrefix(lineStr, "data: ") {
+					continue
+				}
+
+				jsonData := []byte(strings.TrimPrefix(lineStr, "data: "))
 
 				var response models.OpenAIChatCompletionResponse
 				if err := json.Unmarshal(jsonData, &response); err != nil {
@@ -325,64 +320,6 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(request *models.Open
 				}
 
 				ch <- response
-			} else {
-				// With timeout
-				select {
-				case result := <-resultChan:
-					if result.err != nil {
-						if result.err == io.EOF {
-							if c.debug {
-								log.Debugf("StreamChatCompletion: EOF reached")
-							}
-							return
-						}
-						if c.debug {
-							log.Debugf("StreamChatCompletion error reading line: %v", result.err)
-						}
-						continue
-					}
-
-					if result.line == "" {
-						continue
-					}
-
-					if c.debug {
-						log.Debugf("StreamChatCompletion SSE Line: %s", result.line)
-					}
-
-					if result.line == "data: [DONE]" {
-						if c.debug {
-							log.Debugf("StreamChatCompletion: Received [DONE]")
-						}
-						return
-					}
-
-					if !bytes.HasPrefix([]byte(result.line), []byte("data: ")) {
-						continue
-					}
-
-					jsonData := bytes.TrimPrefix([]byte(result.line), []byte("data: "))
-
-					var response models.OpenAIChatCompletionResponse
-					if err := json.Unmarshal(jsonData, &response); err != nil {
-						if c.debug {
-							log.Debugf("StreamChatCompletion error unmarshaling: %v, data: %s", err, string(jsonData))
-						}
-						continue
-					}
-
-					if c.debug {
-						log.Debugf("StreamChatCompletion Parsed Response: %+v", response)
-					}
-
-					ch <- response
-				case <-time.After(chunkTimeout):
-					if c.debug {
-						log.Debugf("StreamChatCompletion: Chunk timeout reached, recalculating for next chunk")
-					}
-					// Continue to next iteration with new timeout calculation
-					continue
-				}
 			}
 		}
 	}()
@@ -499,7 +436,12 @@ func (c *OpenAIClient) getTimeoutClient() *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &http.Client{Timeout: timeout}
+
+	// Create a simple timeout client with default transport
+	return &http.Client{
+		Timeout: timeout,
+		// Use default transport to avoid HTTP/2 issues
+	}
 }
 
 func (c *OpenAIClient) calculateChunkTimeout() time.Duration {

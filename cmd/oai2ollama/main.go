@@ -3,8 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type CLIOptions struct {
@@ -101,6 +104,11 @@ func main() {
 		cfg.Server.Debug = true
 	}
 
+	// Initialize logging configuration
+	if err := initLogging(cfg); err != nil {
+		log.Fatalf("Failed to initialize logging: %v", err)
+	}
+
 	// Create Fiber app with debug mode
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -143,9 +151,22 @@ func main() {
 		},
 	}))
 
+	// Configure middleware logger output
+	var loggerOutput io.Writer = os.Stdout
+	if cfg.Logging.File != "" {
+		// Use the same file output for middleware logger
+		loggerOutput = &lumberjack.Logger{
+			Filename:   cfg.Logging.File,
+			MaxSize:    cfg.Logging.MaxSize,
+			MaxBackups: cfg.Logging.MaxBackups,
+			MaxAge:     cfg.Logging.MaxAge,
+			Compress:   cfg.Logging.Compress,
+		}
+	}
+
 	app.Use(logger.New(logger.Config{
 		Format: "${time} | ${status} | ${latency} | ${ip} | ${method} | ${path} | ${error}\n",
-		Output: os.Stdout,
+		Output: loggerOutput,
 	}))
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
@@ -179,6 +200,9 @@ func main() {
 					"copy":       "POST /api/copy",
 					"create":     "POST /api/create",
 					"version":    "GET /api/version",
+				},
+				"openai_api": map[string]string{
+					"chat_completions": "POST /v1/chat/completions",
 				},
 			},
 		})
@@ -230,6 +254,10 @@ func setupRoutes(app *fiber.App, ollamaHandler *handlers.OllamaHandler) {
 	api.Post("/pull", ollamaHandler.PullModel)        // Pull model (mock)
 	api.Post("/show", ollamaHandler.ShowModel)        // Show model information
 	api.Delete("/delete", ollamaHandler.DeleteModel)  // Delete model (mock)
+
+	// OpenAI API compatible endpoints
+	v1 := app.Group("/v1")
+	v1.Post("/chat/completions", ollamaHandler.ChatCompletions) // OpenAI compatible chat completions
 }
 
 // getDetailedStackTrace returns a formatted stack trace with file paths and line numbers
@@ -289,4 +317,51 @@ func openConfigEditor() {
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Run()
+}
+
+// initLogging initializes the logging configuration based on the config file
+func initLogging(cfg *config.Config) error {
+	// Set log level
+	logLevel := cfg.Logging.Level
+	switch strings.ToLower(logLevel) {
+	case "debug":
+		log.SetLevel(log.LevelDebug)
+	case "info":
+		log.SetLevel(log.LevelInfo)
+	case "warn", "warning":
+		log.SetLevel(log.LevelWarn)
+	case "error":
+		log.SetLevel(log.LevelError)
+	case "fatal":
+		log.SetLevel(log.LevelFatal)
+	default:
+		log.SetLevel(log.LevelInfo)
+	}
+
+	// Configure log output to file if specified
+	if cfg.Logging.File != "" {
+		// Create directory for log file if it doesn't exist
+		logDir := filepath.Dir(cfg.Logging.File)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			return fmt.Errorf("failed to create log directory %s: %w", logDir, err)
+		}
+
+		// Use lumberjack for log rotation
+		lumberjackLogger := &lumberjack.Logger{
+			Filename:   cfg.Logging.File,
+			MaxSize:    cfg.Logging.MaxSize,    // megabytes
+			MaxBackups: cfg.Logging.MaxBackups,
+			MaxAge:     cfg.Logging.MaxAge,     // days
+			Compress:   cfg.Logging.Compress,
+		}
+
+		// Set the global logger output to file
+		log.SetOutput(lumberjackLogger)
+	}
+
+	// Log initialization message using the configured logger
+	log.Infof("Logging initialized - Level: %s, Format: %s, File: %s",
+		cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
+
+	return nil
 }
