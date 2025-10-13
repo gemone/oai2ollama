@@ -69,10 +69,6 @@ start:
 	@echo "Example: edit configs/config.yaml and replace 'sk-your-openai-api-key-here' with your actual API key"
 	@echo "Then run: make run"
 
-# Start application
-run: build
-	@./bin/oai2ollama-go
-
 # Edit configuration
 config:
 	@if command -v code > /dev/null 2>&1; then code configs/config.yaml; elif command -v nano > /dev/null 2>&1; then nano configs/config.yaml; elif command -v vim > /dev/null 2>&1; then vim configs/config.yaml; else echo "Please edit configs/config.yaml manually"; fi

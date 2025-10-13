@@ -416,19 +416,6 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	}, nil
 }
 
-// Helper function to read Server-Sent Events lines
-
-func readSSELine(r io.Reader) (string, error) {
-	reader := bufio.NewReader(r)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	// Remove trailing \r and \n
-	line = strings.TrimRight(line, "\r\n")
-	return line, nil
-}
-
 // Helper methods for timeout management
 func (c *OpenAIClient) getTimeoutClient() *http.Client {
 	timeout := time.Duration(c.config.Timeout) * time.Second
@@ -441,25 +428,6 @@ func (c *OpenAIClient) getTimeoutClient() *http.Client {
 		Timeout: timeout,
 		// Use default transport to avoid HTTP/2 issues
 	}
-}
-
-func (c *OpenAIClient) calculateChunkTimeout() time.Duration {
-	// Calculate dynamic timeout based on backend configuration
-	// Default to 30 seconds per chunk for streaming
-	baseTimeout := 30 * time.Second
-
-	if c.config.Timeout > 0 {
-		// Use configured timeout as base, but allow reasonable time per chunk
-		configuredTimeout := time.Duration(c.config.Timeout) * time.Second
-		// For streaming chunks, allow up to the configured timeout per chunk
-		if configuredTimeout > baseTimeout {
-			baseTimeout = configuredTimeout
-		}
-	}
-
-	// For streaming, we want reasonable per-chunk timeouts
-	// Allow some buffer time for processing
-	return baseTimeout
 }
 
 func sanitizeHeadersForLogging(headers http.Header) map[string]string {

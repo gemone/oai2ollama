@@ -316,7 +316,9 @@ func openConfigEditor() {
 	execCmd := exec.Command(cmd, args...)
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
-	execCmd.Run()
+	if err := execCmd.Run(); err != nil {
+		fmt.Printf("Failed to open editor: %v\n", err)
+	}
 }
 
 // initLogging initializes the logging configuration based on the config file
