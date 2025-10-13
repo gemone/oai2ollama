@@ -12,6 +12,7 @@ import (
 
 	"github.com/gemone/oai2ollama/internal/config"
 	"github.com/gemone/oai2ollama/internal/handlers"
+	"github.com/gemone/oai2ollama/internal/middleware"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/log"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -177,6 +178,11 @@ func main() {
 	// Initialize handlers
 	ollamaHandler := handlers.NewOllamaHandler(cfg)
 
+	// Add metrics middleware if enabled
+	if cfg.Metrics.Enabled {
+		app.Use(middleware.MetricsMiddleware(ollamaHandler.GetMetricsService()))
+	}
+
 	// Setup routes
 	setupRoutes(app, ollamaHandler)
 
@@ -258,6 +264,16 @@ func setupRoutes(app *fiber.App, ollamaHandler *handlers.OllamaHandler) {
 	// OpenAI API compatible endpoints
 	v1 := app.Group("/v1")
 	v1.Post("/chat/completions", ollamaHandler.ChatCompletions) // OpenAI compatible chat completions
+
+	// Metrics API endpoints
+	if ollamaHandler.GetMetricsService() != nil {
+		metrics := app.Group("/metrics")
+		metrics.Get("/", ollamaHandler.GetMetricsSummary)                  // Get metrics summary
+		metrics.Get("/requests", ollamaHandler.GetMetrics)                 // Get detailed metrics
+		metrics.Get("/tokens", ollamaHandler.GetTokenUsage)                // Get token usage
+		metrics.Get("/models/:model", ollamaHandler.GetModelMetrics)       // Get model-specific metrics
+		metrics.Get("/backends/:backend", ollamaHandler.GetBackendMetrics) // Get backend-specific metrics
+	}
 }
 
 // getDetailedStackTrace returns a formatted stack trace with file paths and line numbers

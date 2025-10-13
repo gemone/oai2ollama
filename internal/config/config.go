@@ -13,6 +13,7 @@ type Config struct {
 	Models   []ModelConfig   `mapstructure:"models"`
 	Logging  LoggingConfig   `mapstructure:"logging"`
 	Database DatabaseConfig  `mapstructure:"database"`
+	Metrics  MetricsConfig   `mapstructure:"metrics"`
 }
 
 type ServerConfig struct {
@@ -77,6 +78,19 @@ type DatabaseConfig struct {
 	Path              string `mapstructure:"path"`
 	MaxConnections    int    `mapstructure:"max_connections"`
 	ConnectionTimeout int    `mapstructure:"connection_timeout"`
+}
+
+type MetricsConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	DatabasePath        string `mapstructure:"database_path"`
+	RetentionPeriod     string `mapstructure:"retention_period"`
+	AggregationInterval string `mapstructure:"aggregation_interval"`
+	MaxConnections      int    `mapstructure:"max_connections"`
+	CollectRequestSize  bool   `mapstructure:"collect_request_size"`
+	CollectResponseSize bool   `mapstructure:"collect_response_size"`
+	CollectUserAgent    bool   `mapstructure:"collect_user_agent"`
+	CollectClientIP     bool   `mapstructure:"collect_client_ip"`
+	AnonymizeIPs        bool   `mapstructure:"anonymize_ips"`
 }
 
 type ParameterRange struct {
@@ -151,6 +165,18 @@ func setDefaults() {
 	viper.SetDefault("database.path", "metrics.db")
 	viper.SetDefault("database.max_connections", 10)
 	viper.SetDefault("database.connection_timeout", 30)
+
+	// Metrics defaults
+	viper.SetDefault("metrics.enabled", true)
+	viper.SetDefault("metrics.database_path", "metrics.db")
+	viper.SetDefault("metrics.retention_period", "720h") // 30 days
+	viper.SetDefault("metrics.aggregation_interval", "1h")
+	viper.SetDefault("metrics.max_connections", 10)
+	viper.SetDefault("metrics.collect_request_size", true)
+	viper.SetDefault("metrics.collect_response_size", true)
+	viper.SetDefault("metrics.collect_user_agent", true)
+	viper.SetDefault("metrics.collect_client_ip", true)
+	viper.SetDefault("metrics.anonymize_ips", true)
 
 }
 

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gemone/oai2ollama/internal/config"
+	"github.com/gemone/oai2ollama/internal/middleware"
 	"github.com/gemone/oai2ollama/internal/models"
 	"github.com/gemone/oai2ollama/internal/services"
 	"github.com/gemone/oai2ollama/pkg/client"
@@ -21,6 +23,7 @@ type OllamaHandler struct {
 	backendClients map[string]models.BackendClient
 	config         *config.Config
 	modelCache     *services.ModelCache
+	metricsService *services.MetricsService
 }
 
 func NewOllamaHandler(cfg *config.Config) *OllamaHandler {
@@ -40,7 +43,294 @@ func NewOllamaHandler(cfg *config.Config) *OllamaHandler {
 	// Initialize model cache
 	handler.modelCache = services.NewModelCache(cfg, handler.backendClients, handler.converter)
 
+	// Initialize metrics service
+	metricsConfig := models.DefaultMetricsConfig()
+	if cfg.Metrics.Enabled {
+		metricsConfig.Enabled = cfg.Metrics.Enabled
+		metricsConfig.DatabasePath = cfg.Metrics.DatabasePath
+		metricsConfig.MaxConnections = cfg.Metrics.MaxConnections
+		metricsConfig.CollectRequestSize = cfg.Metrics.CollectRequestSize
+		metricsConfig.CollectResponseSize = cfg.Metrics.CollectResponseSize
+		metricsConfig.CollectUserAgent = cfg.Metrics.CollectUserAgent
+		metricsConfig.CollectClientIP = cfg.Metrics.CollectClientIP
+		metricsConfig.AnonymizeIPs = cfg.Metrics.AnonymizeIPs
+
+		// Parse duration strings
+		if cfg.Metrics.RetentionPeriod != "" {
+			if duration, err := time.ParseDuration(cfg.Metrics.RetentionPeriod); err == nil {
+				metricsConfig.RetentionPeriod = duration
+			}
+		}
+		if cfg.Metrics.AggregationInterval != "" {
+			if duration, err := time.ParseDuration(cfg.Metrics.AggregationInterval); err == nil {
+				metricsConfig.AggregationInterval = duration
+			}
+		}
+	}
+
+	metricsService, err := services.NewMetricsService(metricsConfig)
+	if err != nil {
+		log.Errorf("Failed to initialize metrics service: %v", err)
+		// Continue without metrics if initialization fails
+		handler.metricsService = nil
+	} else {
+		handler.metricsService = metricsService
+	}
+
 	return handler
+}
+
+// GetMetricsService returns the metrics service instance
+func (h *OllamaHandler) GetMetricsService() *services.MetricsService {
+	return h.metricsService
+}
+
+// GET /metrics - Get metrics summary
+func (h *OllamaHandler) GetMetricsSummary(c *fiber.Ctx) error {
+	if h.metricsService == nil {
+		return c.Status(503).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Metrics service not available",
+				Type:    "service_unavailable",
+				Code:    "metrics_disabled",
+			},
+		})
+	}
+
+	// Parse query parameters
+	filter := h.parseMetricsFilter(c)
+
+	summary, err := h.metricsService.GetSummary(filter)
+	if err != nil {
+		return c.Status(500).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: fmt.Sprintf("Failed to get metrics summary: %v", err),
+				Type:    "internal_error",
+				Code:    "metrics_error",
+			},
+		})
+	}
+
+	return c.JSON(summary)
+}
+
+// GET /metrics/requests - Get detailed metrics
+func (h *OllamaHandler) GetMetrics(c *fiber.Ctx) error {
+	if h.metricsService == nil {
+		return c.Status(503).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Metrics service not available",
+				Type:    "service_unavailable",
+				Code:    "metrics_disabled",
+			},
+		})
+	}
+
+	// Parse query parameters
+	filter := h.parseMetricsFilter(c)
+
+	metrics, err := h.metricsService.GetMetrics(filter)
+	if err != nil {
+		return c.Status(500).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: fmt.Sprintf("Failed to get metrics: %v", err),
+				Type:    "internal_error",
+				Code:    "metrics_error",
+			},
+		})
+	}
+
+	return c.JSON(map[string]interface{}{
+		"metrics": metrics,
+		"filter":  filter,
+		"total":   len(metrics),
+	})
+}
+
+// GET /metrics/tokens - Get token usage statistics
+func (h *OllamaHandler) GetTokenUsage(c *fiber.Ctx) error {
+	if h.metricsService == nil {
+		return c.Status(503).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Metrics service not available",
+				Type:    "service_unavailable",
+				Code:    "metrics_disabled",
+			},
+		})
+	}
+
+	// Parse query parameters
+	filter := h.parseMetricsFilter(c)
+
+	tokenUsage, err := h.metricsService.GetTokenUsage(filter)
+	if err != nil {
+		return c.Status(500).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: fmt.Sprintf("Failed to get token usage: %v", err),
+				Type:    "internal_error",
+				Code:    "metrics_error",
+			},
+		})
+	}
+
+	return c.JSON(map[string]interface{}{
+		"token_usage": tokenUsage,
+		"filter":      filter,
+	})
+}
+
+// GET /metrics/models/:model - Get model-specific metrics
+func (h *OllamaHandler) GetModelMetrics(c *fiber.Ctx) error {
+	if h.metricsService == nil {
+		return c.Status(503).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Metrics service not available",
+				Type:    "service_unavailable",
+				Code:    "metrics_disabled",
+			},
+		})
+	}
+
+	modelName := c.Params("model")
+	if modelName == "" {
+		return c.Status(400).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Model name is required",
+				Type:    "invalid_request_error",
+				Code:    "missing_model",
+				Param:   "model",
+			},
+		})
+	}
+
+	// Parse query parameters
+	filter := h.parseMetricsFilter(c)
+
+	summary, err := h.metricsService.GetMetricsByModel(modelName, filter)
+	if err != nil {
+		return c.Status(500).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: fmt.Sprintf("Failed to get model metrics: %v", err),
+				Type:    "internal_error",
+				Code:    "metrics_error",
+			},
+		})
+	}
+
+	return c.JSON(map[string]interface{}{
+		"model":   modelName,
+		"metrics": summary,
+	})
+}
+
+// GET /metrics/backends/:backend - Get backend-specific metrics
+func (h *OllamaHandler) GetBackendMetrics(c *fiber.Ctx) error {
+	if h.metricsService == nil {
+		return c.Status(503).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Metrics service not available",
+				Type:    "service_unavailable",
+				Code:    "metrics_disabled",
+			},
+		})
+	}
+
+	backendName := c.Params("backend")
+	if backendName == "" {
+		return c.Status(400).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: "Backend name is required",
+				Type:    "invalid_request_error",
+				Code:    "missing_backend",
+				Param:   "backend",
+			},
+		})
+	}
+
+	// Parse query parameters
+	filter := h.parseMetricsFilter(c)
+
+	summary, err := h.metricsService.GetMetricsByBackend(backendName, filter)
+	if err != nil {
+		return c.Status(500).JSON(models.ErrorResponse{
+			Error: models.APIError{
+				Message: fmt.Sprintf("Failed to get backend metrics: %v", err),
+				Type:    "internal_error",
+				Code:    "metrics_error",
+			},
+		})
+	}
+
+	return c.JSON(map[string]interface{}{
+		"backend": backendName,
+		"metrics": summary,
+	})
+}
+
+// parseMetricsFilter parses query parameters into a MetricsFilter
+func (h *OllamaHandler) parseMetricsFilter(c *fiber.Ctx) models.MetricsFilter {
+	filter := models.MetricsFilter{}
+
+	// Parse time range
+	if startTimeStr := c.Query("start_time"); startTimeStr != "" {
+		if startTime, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
+			filter.StartTime = &startTime
+		}
+	}
+
+	if endTimeStr := c.Query("end_time"); endTimeStr != "" {
+		if endTime, err := time.Parse(time.RFC3339, endTimeStr); err == nil {
+			filter.EndTime = &endTime
+		}
+	}
+
+	// Parse filters
+	filter.Model = c.Query("model")
+	filter.Backend = c.Query("backend")
+	filter.Method = c.Query("method")
+
+	if statusStr := c.Query("status"); statusStr != "" {
+		if status, err := strconv.Atoi(statusStr); err == nil {
+			filter.Status = &status
+		}
+	}
+
+	if minTokensStr := c.Query("min_tokens"); minTokensStr != "" {
+		if minTokens, err := strconv.Atoi(minTokensStr); err == nil {
+			filter.MinTokens = &minTokens
+		}
+	}
+
+	if maxTokensStr := c.Query("max_tokens"); maxTokensStr != "" {
+		if maxTokens, err := strconv.Atoi(maxTokensStr); err == nil {
+			filter.MaxTokens = &maxTokens
+		}
+	}
+
+	if streamingStr := c.Query("streaming"); streamingStr != "" {
+		if streaming, err := strconv.ParseBool(streamingStr); err == nil {
+			filter.Streaming = &streaming
+		}
+	}
+
+	// Parse pagination
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
+			filter.Limit = limit
+		}
+	}
+
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
+			filter.Offset = offset
+		}
+	}
+
+	// Parse sorting
+	filter.OrderBy = c.Query("order_by", "timestamp")
+	filter.OrderDir = c.Query("order_dir", "desc")
+
+	return filter
 }
 
 // GET /api/tags - List models
@@ -236,6 +526,10 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 	if response.Usage != nil {
 		generateResponse.PromptEvalCount = response.Usage.PromptTokens
 		generateResponse.EvalCount = response.Usage.CompletionTokens
+
+		// Record token usage in response headers for middleware
+		middleware.SetTokenUsage(c, response.Usage.PromptTokens,
+			response.Usage.CompletionTokens, response.Usage.TotalTokens)
 	}
 
 	return c.JSON(generateResponse)
@@ -781,6 +1075,12 @@ func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.Open
 
 	log.Debug("ChatCompletion succeeded")
 
+	// Record token usage in response headers for middleware
+	if response.Usage != nil {
+		middleware.SetTokenUsage(c, response.Usage.PromptTokens,
+			response.Usage.CompletionTokens, response.Usage.TotalTokens)
+	}
+
 	if returnOpenAIFormat {
 		// For OpenAI format, restore the original model name in response
 		response.Model = originalPrefixedModel
@@ -950,6 +1250,12 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 				if len(response.Choices) > 0 && response.Choices[0].FinishReason != "" {
 					log.Debugf("[%s] Received final chunk with finish reason: %s (total chunks: %d)",
 						requestID, response.Choices[0].FinishReason, chunkCount)
+
+					// Record token usage if available in the final chunk
+					if response.Usage != nil {
+						middleware.SetTokenUsage(c, response.Usage.PromptTokens,
+							response.Usage.CompletionTokens, response.Usage.TotalTokens)
+					}
 
 					var doneData string
 					if returnOpenAIFormat {

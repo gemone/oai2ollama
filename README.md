@@ -8,6 +8,7 @@ A high-performance Go implementation of Oai2Ollama that provides Ollama API comp
 - **🌐 Multiple Backends**: Support for OpenAI and other OpenAI-compatible APIs
 - **🏷️ Model Prefixing**: Automatic model name prefixing to avoid conflicts
 - **📊 Streaming Support**: Full streaming support for real-time responses
+- **📈 API Metrics**: Comprehensive token statistics and request monitoring
 - **⚡ High Performance**: Built with GoFiber for maximum performance
 - **🔧 Flexible Configuration**: YAML and environment variable configuration
 - **📝 Rich Examples**: Comprehensive examples and documentation
@@ -88,7 +89,38 @@ curl -X POST http://localhost:11434/api/chat \
   }'
 ```
 
-## 🛠️ Configuration
+## � API Metrics & Token Statistics
+
+- **Automatic Collection**: Metrics are collected automatically for all API requests
+- **Token Tracking**: Prompt and completion tokens are tracked for each request
+- **Historical Data**: Configurable retention period for metrics storage
+- **Real-time Monitoring**: Live statistics and aggregated reports
+- **Privacy Controls**: IP anonymization and configurable data collection
+
+### Metrics Endpoints
+
+```bash
+# Get comprehensive metrics summary
+curl http://localhost:11434/metrics/
+
+# Get detailed request metrics with filters
+curl "http://localhost:11434/metrics/requests?model=openai/gpt-4&limit=10"
+
+# Get token usage statistics
+curl http://localhost:11434/metrics/tokens
+
+# Get model-specific metrics
+curl http://localhost:11434/metrics/models/openai/gpt-4
+```
+
+### Testing Metrics
+
+```bash
+# Run the comprehensive test script
+./scripts/test_metrics.sh
+```
+
+## �🛠️ Configuration
 
 ### Config File (`configs/config.yaml`)
 
@@ -97,6 +129,14 @@ server:
   host: "0.0.0.0"
   port: 11434
   debug: false
+
+metrics:
+  enabled: true
+  database_path: "metrics.db"
+  retention_period: "720h"
+  collect_request_size: true
+  collect_response_size: true
+  anonymize_ips: true
 
 backends:
   - name: "openai"
