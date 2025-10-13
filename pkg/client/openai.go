@@ -13,6 +13,7 @@ import (
 
 	"github.com/gemone/oai2ollama/internal/config"
 	"github.com/gemone/oai2ollama/internal/models"
+	"github.com/gemone/oai2ollama/pkg/utils"
 
 	"github.com/gofiber/fiber/v2/log"
 )
@@ -38,16 +39,8 @@ func NewOpenAIClient(backendConfig *config.BackendConfig) *OpenAIClient {
 		debug = config.GlobalConfig.Server.Debug
 	}
 
-	// Use HTTP client with forced HTTP/1.1 to avoid HTTP/2 issues
-	client := &http.Client{
-		Timeout: 0, // No timeout for streaming, handle per request
-		Transport: &http.Transport{
-			ForceAttemptHTTP2:   false, // Force HTTP/1.1 to avoid protocol issues
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 5,
-			IdleConnTimeout:     30 * time.Second,
-		},
-	}
+	// Create optimized HTTP client
+	client := utils.NewHTTPClient(backendConfig.BaseURL, 0) // No timeout for streaming, handle per request
 
 	return &OpenAIClient{
 		config:   backendConfig,
@@ -69,7 +62,7 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 			url = c.modelURL
 		}
 	} else {
-		// Fallback to baseURL + /models
+		// Use baseURL and append /models
 		url = fmt.Sprintf("%s/models", c.baseURL)
 	}
 
@@ -78,43 +71,29 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
-	if c.debug {
-		log.Debugf("GetModels Request: GET %s", url)
-		log.Debugf("GetModels Headers: %+v", sanitizeHeadersForLogging(req.Header))
-	}
-
-	// Use a client with timeout for non-streaming requests
-	timeoutClient := c.getTimeoutClient()
-	resp, err := timeoutClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get models: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("GetModels Response Status: %d", resp.StatusCode)
-		log.Debugf("GetModels Response Body: %s", string(body))
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var response models.OpenAIModelsResponse
-	if err := json.Unmarshal(body, &response); err != nil {
+	var response struct {
+		Object string               `json:"object"`
+		Data   []models.OpenAIModel `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("GetModels Parsed Response: %+v", response)
 	}
 
 	return response.Data, nil
@@ -123,20 +102,9 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionRequest) (*models.OpenAIChatCompletionResponse, error) {
 	url := fmt.Sprintf("%s/chat/completions", c.baseURL)
 
-	// Detect thinking mode
-	thinkingEnabled := request.Thinking != nil && request.Thinking.Type == "enabled"
-
 	jsonData, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("ChatCompletion Request: POST %s", url)
-		log.Debugf("ChatCompletion Request Body: %s", string(jsonData))
-		if thinkingEnabled {
-			log.Debug("ChatCompletion: Thinking mode detected (type: enabled)")
-		}
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
@@ -144,61 +112,37 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
-	if c.debug {
-		log.Debugf("ChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
+	// Use client with timeout for non-streaming requests
+	client := c.client
+	if client.Timeout == 0 {
+		client = utils.NewHTTPClient(c.baseURL, 60*time.Second)
 	}
 
-	// Use appropriate client based on thinking mode
-	var resp *http.Response
-	if thinkingEnabled {
-		if c.debug {
-			log.Debug("ChatCompletion: Using no-timeout client for thinking mode")
-		}
-		resp, err = c.client.Do(req) // Use client with no timeout for thinking mode
-	} else {
-		timeoutClient := c.getTimeoutClient()
-		resp, err = timeoutClient.Do(req) // Use client with timeout for normal mode
-	}
-
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete chat: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("ChatCompletion Response Status: %d", resp.StatusCode)
-		log.Debugf("ChatCompletion Response Body: %s", string(body))
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var response models.OpenAIChatCompletionResponse
-	if err := json.Unmarshal(body, &response); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("ChatCompletion Parsed Response: %+v", response)
 	}
 
 	return &response, nil
 }
 
 func (c *OpenAIClient) StreamChatCompletion(ctx context.Context, request *models.OpenAIChatCompletionRequest) (<-chan models.OpenAIChatCompletionResponse, error) {
-	return c.StreamChatCompletionWithChunkTimeout(ctx, request)
-}
-
-func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(ctx context.Context, request *models.OpenAIChatCompletionRequest) (<-chan models.OpenAIChatCompletionResponse, error) {
 	url := fmt.Sprintf("%s/chat/completions", c.baseURL)
 
 	// Ensure streaming is enabled without modifying the original request
@@ -210,46 +154,32 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(ctx context.Context,
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Detect thinking mode
-	thinkingEnabled := request.Thinking != nil && request.Thinking.Type == "enabled"
-
-	if c.debug {
-		log.Debugf("StreamChatCompletion Request: POST %s", url)
-		log.Debugf("StreamChatCompletion Request Body: %s", string(jsonData))
-		log.Debug("StreamChatCompletion: Chunk timeout recalculation enabled")
-		if thinkingEnabled {
-			log.Debug("StreamChatCompletion: Thinking mode detected (type: enabled)")
-		}
-	}
-
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
-	if c.debug {
-		log.Debugf("StreamChatCompletion Headers: %+v", sanitizeHeadersForLogging(req.Header))
+	// Use client without timeout for streaming
+	client := c.client
+	if client.Timeout != 0 {
+		client = utils.NewHTTPClient(c.baseURL, 0)
 	}
 
-	resp, err := c.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start stream: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("StreamChatCompletion Response Status: %d", resp.StatusCode)
-		log.Debugf("StreamChatCompletion Response Headers: %+v", sanitizeHeadersForLogging(resp.Header))
-		log.Debug("StreamChatCompletion: Starting to read response body")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	ch := make(chan models.OpenAIChatCompletionResponse)
@@ -258,45 +188,27 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(ctx context.Context,
 		defer resp.Body.Close()
 		defer close(ch)
 
-		if c.debug {
-			log.Debug("StreamChatCompletion: Starting goroutine to read SSE data")
-		}
-
 		reader := bufio.NewReader(resp.Body)
 
 		for {
 			select {
 			case <-ctx.Done():
-				log.Debug("StreamChatCompletion: Context cancelled, closing stream.")
 				return
 			default:
 				line, err := reader.ReadBytes('\n')
 				if err != nil {
 					if err == io.EOF {
-						log.Debug("StreamChatCompletion: EOF reached")
-					} else {
-						log.Debugf("StreamChatCompletion error reading line: %v", err)
+						return
 					}
-					return
+					continue
 				}
 
 				lineStr := strings.TrimSpace(string(line))
-				if c.debug {
-					log.Debugf("StreamChatCompletion Raw SSE Line: '%s'", lineStr)
-				}
-
 				if lineStr == "" {
 					continue
 				}
 
-				if c.debug {
-					log.Debugf("StreamChatCompletion SSE Line: %s", lineStr)
-				}
-
 				if lineStr == "data: [DONE]" {
-					if c.debug {
-						log.Debug("StreamChatCompletion: Received [DONE]")
-					}
 					return
 				}
 
@@ -308,14 +220,7 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(ctx context.Context,
 
 				var response models.OpenAIChatCompletionResponse
 				if err := json.Unmarshal(jsonData, &response); err != nil {
-					if c.debug {
-						log.Debugf("StreamChatCompletion error unmarshaling: %v, data: %s", err, string(jsonData))
-					}
 					continue
-				}
-
-				if c.debug {
-					log.Debugf("StreamChatCompletion Parsed Response: %+v", response)
 				}
 
 				ch <- response
@@ -347,63 +252,41 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	if c.debug {
-		log.Debugf("GenerateEmbeddings Request: POST %s", url)
-		log.Debugf("GenerateEmbeddings Request Body: %s", string(jsonData))
-	}
-
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
-	if c.debug {
-		log.Debugf("GenerateEmbeddings Headers: %+v", sanitizeHeadersForLogging(req.Header))
+	// Use client with timeout
+	client := c.client
+	if client.Timeout == 0 {
+		client = utils.NewHTTPClient(c.baseURL, 60*time.Second)
 	}
 
-	resp, err := c.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embeddings: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("GenerateEmbeddings Response Status: %d", resp.StatusCode)
-		log.Debugf("GenerateEmbeddings Response Body: %s", string(body))
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var openAIResponse struct {
-		Object string `json:"object"`
-		Data   []struct {
-			Object    string    `json:"object"`
-			Index     int       `json:"index"`
+		Data []struct {
 			Embedding []float64 `json:"embedding"`
 		} `json:"data"`
-		Model string `json:"model"`
-		Usage struct {
-			PromptTokens int `json:"prompt_tokens"`
-			TotalTokens  int `json:"total_tokens"`
-		} `json:"usage"`
 	}
 
-	if err := json.Unmarshal(body, &openAIResponse); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&openAIResponse); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if c.debug {
-		log.Debugf("GenerateEmbeddings Parsed Response: %+v", openAIResponse)
 	}
 
 	if len(openAIResponse.Data) == 0 {
@@ -416,45 +299,205 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	}, nil
 }
 
-// Helper methods for timeout management
-func (c *OpenAIClient) getTimeoutClient() *http.Client {
-	timeout := time.Duration(c.config.Timeout) * time.Second
-	if timeout <= 0 {
-		timeout = 30 * time.Second
+func (c *OpenAIClient) ProxyRequest(ctx context.Context, req *http.Request, w http.ResponseWriter) error {
+	// Create a new request based on the incoming request
+	var body io.Reader
+	if req.Body != nil {
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read request body: %w", err)
+		}
+		body = bytes.NewReader(bodyBytes)
 	}
 
-	// Create a simple timeout client with default transport
-	return &http.Client{
-		Timeout: timeout,
-		// Use default transport to avoid HTTP/2 issues
+	// Build the target URL
+	targetURL := c.baseURL
+	if req.URL.RawQuery != "" {
+		targetURL += "?" + req.URL.RawQuery
 	}
-}
 
-func sanitizeHeadersForLogging(headers http.Header) map[string]string {
-	sanitized := make(map[string]string)
+	// Create new request
+	proxyReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL, body)
+	if err != nil {
+		return fmt.Errorf("failed to create proxy request: %w", err)
+	}
 
-	for key, values := range headers {
-		lowerKey := strings.ToLower(key)
-		// Hide sensitive headers
-		if lowerKey == "authorization" || lowerKey == "x-api-key" || lowerKey == "cookie" {
-			if len(values) > 0 {
-				// Show only first few characters to identify the key type
-				value := values[0]
-				if len(value) > sanitizedHeaderPrefixLen+sanitizedHeaderSuffixLen+3 {
-					sanitized[key] = value[:sanitizedHeaderPrefixLen] + "***" + value[len(value)-sanitizedHeaderSuffixLen:]
-				} else {
-					sanitized[key] = "***"
-				}
-			} else {
-				sanitized[key] = "***"
-			}
-		} else {
-			// Show non-sensitive headers normally
-			if len(values) > 0 {
-				sanitized[key] = values[0]
-			}
+	// Copy headers
+	for name, values := range req.Header {
+		for _, value := range values {
+			proxyReq.Header.Add(name, value)
 		}
 	}
 
-	return sanitized
+	// Set API key if configured
+	if c.apiKey != "" {
+		proxyReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	// Ensure Content-Type is set
+	if proxyReq.Header.Get("Content-Type") == "" {
+		proxyReq.Header.Set("Content-Type", "application/json")
+	}
+
+	// Add OpenAI compatibility headers
+	proxyReq.Header.Set("Accept", "application/json, text/event-stream")
+	proxyReq.Header.Set("User-Agent", "oai2ollama/1.0")
+
+	// Log the request if debug is enabled
+	if c.debug {
+		log.Infof("Proxying %s request to: %s", req.Method, targetURL)
+		c.logHeaders(proxyReq.Header)
+	}
+
+	// Make the request with timeout
+	client := c.client
+	if client.Timeout == 0 {
+		client = utils.NewHTTPClient(c.baseURL, 60*time.Second)
+	}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		return fmt.Errorf("failed to make proxy request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for name, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+
+	// Set status code
+	w.WriteHeader(resp.StatusCode)
+
+	// Copy response body
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to copy response body: %w", err)
+	}
+
+	return nil
+}
+
+func (c *OpenAIClient) ProxyStreamingRequest(ctx context.Context, req *http.Request, w http.ResponseWriter) error {
+	// Create a new request based on the incoming request
+	var body io.Reader
+	if req.Body != nil {
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read request body: %w", err)
+		}
+		body = bytes.NewReader(bodyBytes)
+	}
+
+	// Build the target URL
+	targetURL := c.baseURL
+	if req.URL.RawQuery != "" {
+		targetURL += "?" + req.URL.RawQuery
+	}
+
+	// Create new request
+	proxyReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL, body)
+	if err != nil {
+		return fmt.Errorf("failed to create proxy request: %w", err)
+	}
+
+	// Copy headers
+	for name, values := range req.Header {
+		for _, value := range values {
+			proxyReq.Header.Add(name, value)
+		}
+	}
+
+	// Set API key if configured
+	if c.apiKey != "" {
+		proxyReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	// Ensure Content-Type is set
+	if proxyReq.Header.Get("Content-Type") == "" {
+		proxyReq.Header.Set("Content-Type", "application/json")
+	}
+
+	// Add OpenAI compatibility headers
+	proxyReq.Header.Set("Accept", "text/event-stream")
+	proxyReq.Header.Set("Cache-Control", "no-cache")
+	proxyReq.Header.Set("User-Agent", "oai2ollama/1.0")
+
+	// Log the request if debug is enabled
+	if c.debug {
+		log.Infof("Proxying streaming %s request to: %s", req.Method, targetURL)
+		c.logHeaders(proxyReq.Header)
+	}
+
+	// Make the request
+	client := c.client
+	if client.Timeout == 0 {
+		client = utils.NewHTTPClient(c.baseURL, 0) // No timeout for streaming
+	}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		return fmt.Errorf("failed to make proxy request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for name, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+
+	// Set status code
+	w.WriteHeader(resp.StatusCode)
+
+	// Copy response body with streaming
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if _, err := fmt.Fprint(w, line+"\n"); err != nil {
+			return fmt.Errorf("failed to write response: %w", err)
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	return nil
+}
+
+func (c *OpenAIClient) logHeaders(headers http.Header) {
+	for name, values := range headers {
+		for _, value := range values {
+			if c.shouldSanitizeHeader(name) {
+				log.Infof("Header: %s: %s", name, c.sanitizeHeaderValue(value))
+			} else {
+				log.Infof("Header: %s: %s", name, value)
+			}
+		}
+	}
+}
+
+func (c *OpenAIClient) shouldSanitizeHeader(headerName string) bool {
+	headerName = strings.ToLower(headerName)
+	sensitiveHeaders := []string{"authorization", "api-key", "x-api-key", "cookie", "set-cookie"}
+	for _, sensitive := range sensitiveHeaders {
+		if strings.Contains(headerName, sensitive) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *OpenAIClient) sanitizeHeaderValue(value string) string {
+	if len(value) <= sanitizedHeaderPrefixLen+sanitizedHeaderSuffixLen {
+		return strings.Repeat("*", len(value))
+	}
+	return value[:sanitizedHeaderPrefixLen] + strings.Repeat("*", len(value)-sanitizedHeaderPrefixLen-sanitizedHeaderSuffixLen) + value[len(value)-sanitizedHeaderSuffixLen:]
 }
