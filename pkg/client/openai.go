@@ -42,7 +42,7 @@ func NewOpenAIClient(backendConfig *config.BackendConfig) *OpenAIClient {
 	client := &http.Client{
 		Timeout: 0, // No timeout for streaming, handle per request
 		Transport: &http.Transport{
-			ForceAttemptHTTP2: false, // Force HTTP/1.1 to avoid protocol issues
+			ForceAttemptHTTP2:   false, // Force HTTP/1.1 to avoid protocol issues
 			MaxIdleConns:        10,
 			MaxIdleConnsPerHost: 5,
 			IdleConnTimeout:     30 * time.Second,
@@ -252,7 +252,6 @@ func (c *OpenAIClient) StreamChatCompletionWithChunkTimeout(ctx context.Context,
 		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
 	}
 
-	
 	ch := make(chan models.OpenAIChatCompletionResponse)
 
 	go func() {

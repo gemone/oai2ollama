@@ -993,7 +993,7 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 			}
 		}
 
-streamEnded:
+	streamEnded:
 		// Handle case where stream ended normally but no chunks were processed
 		if streamEndedNormally && chunkCount == 0 {
 			log.Debugf("[%s] Stream ended with 0 chunks - falling back to non-streaming request", requestID)

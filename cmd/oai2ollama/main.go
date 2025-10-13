@@ -349,9 +349,9 @@ func initLogging(cfg *config.Config) error {
 		// Use lumberjack for log rotation
 		lumberjackLogger := &lumberjack.Logger{
 			Filename:   cfg.Logging.File,
-			MaxSize:    cfg.Logging.MaxSize,    // megabytes
+			MaxSize:    cfg.Logging.MaxSize, // megabytes
 			MaxBackups: cfg.Logging.MaxBackups,
-			MaxAge:     cfg.Logging.MaxAge,     // days
+			MaxAge:     cfg.Logging.MaxAge, // days
 			Compress:   cfg.Logging.Compress,
 		}
 
