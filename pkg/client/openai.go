@@ -102,7 +102,7 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionRequest) (*models.OpenAIChatCompletionResponse, error) {
 	url := fmt.Sprintf("%s/chat/completions", c.baseURL)
 
-	jsonData, err := json.Marshal(request)
+	jsonData, err := utils.MarshalJSON(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -149,7 +149,7 @@ func (c *OpenAIClient) StreamChatCompletion(ctx context.Context, request *models
 	reqCopy := *request
 	reqCopy.Stream = true
 
-	jsonData, err := json.Marshal(&reqCopy)
+	jsonData, err := utils.MarshalJSON(&reqCopy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -247,7 +247,7 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 		}
 	}
 
-	jsonData, err := json.Marshal(openAIRequest)
+	jsonData, err := utils.MarshalJSON(openAIRequest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}

@@ -14,6 +14,7 @@ type Config struct {
 	Logging  LoggingConfig   `mapstructure:"logging"`
 	Database DatabaseConfig  `mapstructure:"database"`
 	Metrics  MetricsConfig   `mapstructure:"metrics"`
+	Cache    CacheConfig     `mapstructure:"cache"`
 }
 
 type ServerConfig struct {
@@ -91,6 +92,13 @@ type MetricsConfig struct {
 	CollectUserAgent    bool   `mapstructure:"collect_user_agent"`
 	CollectClientIP     bool   `mapstructure:"collect_client_ip"`
 	AnonymizeIPs        bool   `mapstructure:"anonymize_ips"`
+}
+
+type CacheConfig struct {
+	Enabled         bool   `mapstructure:"enabled"`
+	MaxSize         int    `mapstructure:"max_size"`
+	TTL             string `mapstructure:"ttl"`
+	CleanupInterval string `mapstructure:"cleanup_interval"`
 }
 
 type ParameterRange struct {

@@ -56,10 +56,12 @@ func MetricsMiddleware(metricsService *services.MetricsService) fiber.Handler {
 		}
 
 		// Extract model and backend information from request
-		metric.Model, metric.Backend = extractModelInfo(c)
+		parser := GetGlobalRequestBodyParser()
+		metric.Model, metric.Backend = parser.ParseModelInfo(c.Request().Body(), c.Path())
 
 		// Extract token usage from response if available
-		metric.PromptTokens, metric.TotalTokens = extractTokenUsage(c)
+		extractor := GetGlobalTokenUsageExtractor()
+		metric.PromptTokens, metric.TotalTokens = extractor.ExtractTokenUsage(c.Response().Body())
 
 		// Determine if this was a streaming request
 		metric.Streaming = isStreamingRequest(c)
@@ -80,175 +82,6 @@ func MetricsMiddleware(metricsService *services.MetricsService) fiber.Handler {
 
 		return err
 	}
-}
-
-// extractModelInfo extracts model and backend information from the request
-func extractModelInfo(c *fiber.Ctx) (string, string) {
-	var model, backend string
-
-	// Try to extract from different request formats
-	switch c.Path() {
-	case "/api/chat", "/v1/chat/completions":
-		// For chat endpoints, try to parse the request body
-		if c.Method() == "POST" {
-			body := c.Request().Body()
-			if len(body) > 0 {
-				// Simple JSON parsing to extract model
-				bodyStr := string(body)
-				if strings.Contains(bodyStr, `"model"`) {
-					// Extract model value (simple approach)
-					parts := strings.Split(bodyStr, `"model"`)
-					if len(parts) > 1 {
-						modelPart := parts[1]
-						if idx := strings.Index(modelPart, `"`); idx > 0 {
-							modelPart = modelPart[idx+1:]
-							if idx := strings.Index(modelPart, `"`); idx > 0 {
-								model = modelPart[:idx]
-							}
-						}
-					}
-				}
-			}
-		}
-	case "/api/generate":
-		// For generate endpoint
-		if c.Method() == "POST" {
-			body := c.Request().Body()
-			if len(body) > 0 {
-				bodyStr := string(body)
-				if strings.Contains(bodyStr, `"model"`) {
-					parts := strings.Split(bodyStr, `"model"`)
-					if len(parts) > 1 {
-						modelPart := parts[1]
-						if idx := strings.Index(modelPart, `"`); idx > 0 {
-							modelPart = modelPart[idx+1:]
-							if idx := strings.Index(modelPart, `"`); idx > 0 {
-								model = modelPart[:idx]
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Extract backend from model name if model contains prefix
-	if model != "" && strings.Contains(model, "/") {
-		parts := strings.SplitN(model, "/", 2)
-		if len(parts) == 2 {
-			backend = parts[0]
-			// Keep the full model name including prefix
-		}
-	}
-
-	return model, backend
-}
-
-// extractTokenUsage extracts token usage information from the response
-func extractTokenUsage(c *fiber.Ctx) (int, int) {
-	var promptTokens, totalTokens int
-
-	// Try to extract from response headers first (use GetRespHeader for response headers)
-	if usageHeader := c.GetRespHeader("X-Token-Usage"); usageHeader != "" {
-		// Format: "prompt,total" (e.g., "8,251")
-		if strings.Contains(usageHeader, ",") {
-			parts := strings.Split(usageHeader, ",")
-			if len(parts) == 2 {
-				// Parse prompt tokens
-				if _, err := fmt.Sscanf(strings.TrimSpace(parts[0]), "%d", &promptTokens); err == nil {
-					// Parse total tokens
-					if _, err := fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &totalTokens); err == nil {
-						return promptTokens, totalTokens
-					}
-				}
-			}
-		}
-	}
-
-	// Try to extract from response body for JSON responses
-	responseBody := c.Response().Body()
-	if len(responseBody) > 0 {
-		bodyStr := string(responseBody)
-
-		// Look for OpenAI usage format
-		if strings.Contains(bodyStr, `"usage"`) {
-			// Extract prompt_tokens
-			if strings.Contains(bodyStr, `"prompt_tokens"`) {
-				parts := strings.Split(bodyStr, `"prompt_tokens"`)
-				if len(parts) > 1 {
-					tokenPart := parts[1]
-					// Find the number after the colon
-					if colonIdx := strings.Index(tokenPart, ":"); colonIdx > 0 {
-						tokenPart = tokenPart[colonIdx+1:]
-						// Extract number until comma or closing brace
-						endIdx := strings.IndexAny(tokenPart, ",}")
-						if endIdx > 0 {
-							tokenPart = tokenPart[:endIdx]
-							if _, err := fmt.Sscanf(strings.TrimSpace(tokenPart), "%d", &promptTokens); err == nil {
-								// Successfully extracted prompt tokens
-							}
-						}
-					}
-				}
-			}
-
-			// Extract total_tokens
-			if strings.Contains(bodyStr, `"total_tokens"`) {
-				parts := strings.Split(bodyStr, `"total_tokens"`)
-				if len(parts) > 1 {
-					tokenPart := parts[1]
-					if colonIdx := strings.Index(tokenPart, ":"); colonIdx > 0 {
-						tokenPart = tokenPart[colonIdx+1:]
-						endIdx := strings.IndexAny(tokenPart, ",}")
-						if endIdx > 0 {
-							tokenPart = tokenPart[:endIdx]
-							if _, err := fmt.Sscanf(strings.TrimSpace(tokenPart), "%d", &totalTokens); err == nil {
-								// Successfully extracted total tokens
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Look for Ollama format (prompt_eval_count, eval_count)
-		if strings.Contains(bodyStr, `"prompt_eval_count"`) {
-			parts := strings.Split(bodyStr, `"prompt_eval_count"`)
-			if len(parts) > 1 {
-				tokenPart := parts[1]
-				if colonIdx := strings.Index(tokenPart, ":"); colonIdx > 0 {
-					tokenPart = tokenPart[colonIdx+1:]
-					endIdx := strings.IndexAny(tokenPart, ",}")
-					if endIdx > 0 {
-						tokenPart = tokenPart[:endIdx]
-						if _, err := fmt.Sscanf(strings.TrimSpace(tokenPart), "%d", &promptTokens); err == nil {
-							// Successfully extracted prompt eval count
-						}
-					}
-				}
-			}
-		}
-
-		if strings.Contains(bodyStr, `"eval_count"`) {
-			parts := strings.Split(bodyStr, `"eval_count"`)
-			if len(parts) > 1 {
-				tokenPart := parts[1]
-				if colonIdx := strings.Index(tokenPart, ":"); colonIdx > 0 {
-					tokenPart = tokenPart[colonIdx+1:]
-					endIdx := strings.IndexAny(tokenPart, ",}")
-					if endIdx > 0 {
-						tokenPart = tokenPart[:endIdx]
-						var evalCount int
-						if _, err := fmt.Sscanf(strings.TrimSpace(tokenPart), "%d", &evalCount); err == nil {
-							totalTokens = promptTokens + evalCount
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return promptTokens, totalTokens
 }
 
 // isStreamingRequest determines if the request was a streaming request

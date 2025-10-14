@@ -167,3 +167,20 @@ database:
   max_connections: 10
   connection_timeout: 30
 
+metrics:
+  enabled: true
+  database_path: "metrics.db"
+  retention_period: "7d"
+  aggregation_interval: "1h"
+  max_connections: 10
+  collect_request_size: true
+  collect_response_size: true
+  collect_user_agent: true
+  collect_client_ip: true
+  anonymize_ips: true
+
+cache:
+  enabled: true
+  max_size: 1000
+  ttl: "5m"
+  cleanup_interval: "1m"

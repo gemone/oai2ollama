@@ -13,11 +13,19 @@ import (
 )
 
 type ModelConverter struct {
-	config *config.Config
+	config          *config.Config
+	patternMatcher  *ModelPatternMatcher
+	parseCache      *ModelParseCache
+	capabilityCache *ModelCapabilityCache
 }
 
 func NewModelConverter(cfg *config.Config) *ModelConverter {
-	return &ModelConverter{config: cfg}
+	return &ModelConverter{
+		config:          cfg,
+		patternMatcher:  GetGlobalPatternMatcher(),
+		parseCache:      NewModelParseCache(),
+		capabilityCache: NewModelCapabilityCache(),
+	}
 }
 
 func (c *ModelConverter) ConvertOpenAIChatRequest(request *models.OpenAIChatCompletionRequest) (*models.OllamaChatRequest, error) {
@@ -150,109 +158,121 @@ func (c *ModelConverter) ConvertOpenAIModelsList(openaiModels []models.OpenAIMod
 }
 
 func (c *ModelConverter) ParseModelName(modelName string) (*models.ModelParseResult, error) {
+	// 首先检查缓存
+	if result, found := c.parseCache.Get(modelName); found {
+		return result, nil
+	}
+
 	// Check if config is nil
 	if c == nil || c.config == nil {
 		return nil, fmt.Errorf("model converter or config is nil")
 	}
 
+	var result *models.ModelParseResult
+
 	// 1. Check exact matches in manual model configurations
 	for _, model := range c.config.Models {
 		if model.Name == modelName && model.Enabled {
-			return &models.ModelParseResult{
+			result = &models.ModelParseResult{
 				Backend:      model.Backend,
 				OriginalName: model.OriginalName,
 				DisplayName:  model.DisplayName,
 				ExactMatch:   true,
-			}, nil
+			}
+			break
 		}
 	}
 
 	// 2. Try to parse prefixed models
-	for _, backend := range c.config.Backends {
-		if !backend.Enabled {
-			continue
-		}
-
-		if backend.ModelPrefix != nil && backend.ModelPrefix.Enabled {
-			prefix := backend.ModelPrefix.Prefix
-			if prefix == "" {
-				prefix = backend.Name
+	if result == nil {
+		for _, backend := range c.config.Backends {
+			if !backend.Enabled {
+				continue
 			}
 
-			separator := backend.ModelPrefix.Separator
-			if separator == "" {
-				separator = "/"
-			}
+			if backend.ModelPrefix != nil && backend.ModelPrefix.Enabled {
+				prefix := backend.ModelPrefix.Prefix
+				if prefix == "" {
+					prefix = backend.Name
+				}
 
-			expectedPrefix := prefix + separator
-			if strings.HasPrefix(modelName, expectedPrefix) {
-				originalName := strings.TrimPrefix(modelName, expectedPrefix)
-				return &models.ModelParseResult{
-					Backend:      backend.Name,
-					OriginalName: originalName,
-					DisplayName:  modelName,
-					Prefixed:     true,
-					Prefix:       prefix,
-				}, nil
+				separator := backend.ModelPrefix.Separator
+				if separator == "" {
+					separator = "/"
+				}
+
+				expectedPrefix := prefix + separator
+				if strings.HasPrefix(modelName, expectedPrefix) {
+					originalName := strings.TrimPrefix(modelName, expectedPrefix)
+					result = &models.ModelParseResult{
+						Backend:      backend.Name,
+						OriginalName: originalName,
+						DisplayName:  modelName,
+						Prefixed:     true,
+						Prefix:       prefix,
+					}
+					break
+				}
 			}
 		}
 	}
 
 	// 3. Try to find in any backend without prefix
-	for _, backend := range c.config.Backends {
-		if !backend.Enabled {
-			continue
-		}
+	if result == nil {
+		for _, backend := range c.config.Backends {
+			if !backend.Enabled {
+				continue
+			}
 
-		// This would require checking with the backend if the model exists
-		// For now, assume it could be a valid unprefixed model
-		if backend.ModelPrefix == nil || !backend.ModelPrefix.Enabled {
-			return &models.ModelParseResult{
-				Backend:      backend.Name,
-				OriginalName: modelName,
-				DisplayName:  modelName,
-				Prefixed:     false,
-			}, nil
-		}
-	}
-
-	return nil, fmt.Errorf("model not found: %s", modelName)
-}
-
-func (c *ModelConverter) getModelCapabilities(modelID, backend string) []string {
-	// Default capabilities for all models
-	capabilities := []string{"completion"}
-
-	// Add capabilities based on model name patterns
-	if strings.Contains(strings.ToLower(modelID), "gpt-4") ||
-		strings.Contains(strings.ToLower(modelID), "claude") ||
-		strings.Contains(strings.ToLower(modelID), "llama") {
-		capabilities = append(capabilities, "tools")
-	}
-
-	if strings.Contains(strings.ToLower(modelID), "vision") ||
-		strings.Contains(strings.ToLower(modelID), "claude-3") ||
-		strings.Contains(strings.ToLower(modelID), "gpt-4-vision") {
-		capabilities = append(capabilities, "vision")
-	}
-
-	if strings.Contains(strings.ToLower(modelID), "embedding") {
-		return []string{"embedding"}
-	}
-
-	if strings.Contains(strings.ToLower(modelID), "thinking") ||
-		strings.Contains(strings.ToLower(modelID), "o1") {
-		capabilities = append(capabilities, "thinking")
-	}
-
-	// Check configured model capabilities
-	for _, model := range c.config.Models {
-		if (model.Name == modelID || (model.OriginalName != "" && model.OriginalName == modelID)) && model.Backend == backend {
-			if len(model.Capabilities) > 0 {
-				return model.Capabilities
+			// This would require checking with the backend if the model exists
+			// For now, assume it could be a valid unprefixed model
+			if backend.ModelPrefix == nil || !backend.ModelPrefix.Enabled {
+				result = &models.ModelParseResult{
+					Backend:      backend.Name,
+					OriginalName: modelName,
+					DisplayName:  modelName,
+					Prefixed:     false,
+				}
+				break
 			}
 		}
 	}
+
+	if result == nil {
+		return nil, fmt.Errorf("model not found: %s", modelName)
+	}
+
+	// 缓存结果（TTL 30分钟）
+	c.parseCache.Set(modelName, result, 30*time.Minute)
+
+	return result, nil
+}
+
+func (c *ModelConverter) getModelCapabilities(modelID, backend string) []string {
+	// 首先检查缓存
+	cacheKey := fmt.Sprintf("%s:%s", modelID, backend)
+	if caps, found := c.capabilityCache.Get(cacheKey); found {
+		return caps
+	}
+
+	// 使用模式匹配器获取基础能力
+	matchResult := c.patternMatcher.MatchModel(modelID)
+	capabilities := make([]string, len(matchResult.Capabilities))
+	copy(capabilities, matchResult.Capabilities)
+
+	// 检查配置的模型能力（优先级更高）
+	for _, model := range c.config.Models {
+		if (model.Name == modelID || (model.OriginalName != "" && model.OriginalName == modelID)) && model.Backend == backend {
+			if len(model.Capabilities) > 0 {
+				capabilities = make([]string, len(model.Capabilities))
+				copy(capabilities, model.Capabilities)
+				break
+			}
+		}
+	}
+
+	// 缓存结果（TTL 1小时）
+	c.capabilityCache.Set(cacheKey, capabilities, time.Hour)
 
 	return capabilities
 }
@@ -295,96 +315,19 @@ func (c *ModelConverter) GenerateModelDigest(modelID string, created int64) stri
 }
 
 func (c *ModelConverter) EstimateModelSize(modelID string) int64 {
-	// Estimate model size based on model name patterns
-	// These are rough estimates for demonstration
-	modelID = strings.ToLower(modelID)
-
-	switch {
-	case strings.Contains(modelID, "gpt-4"):
-		if strings.Contains(modelID, "32k") {
-			return 78 * 1024 * 1024 * 1024 // 78GB for 32K context
-		}
-		return 38 * 1024 * 1024 * 1024 // 38GB for standard GPT-4
-	case strings.Contains(modelID, "gpt-3.5"):
-		return 6 * 1024 * 1024 * 1024 // 6GB for GPT-3.5
-	case strings.Contains(modelID, "claude-3"):
-		if strings.Contains(modelID, "opus") {
-			return 30 * 1024 * 1024 * 1024 // 30GB for Claude-3 Opus
-		} else if strings.Contains(modelID, "sonnet") {
-			return 15 * 1024 * 1024 * 1024 // 15GB for Claude-3 Sonnet
-		}
-		return 10 * 1024 * 1024 * 1024 // 10GB for Claude-3 Haiku
-	case strings.Contains(modelID, "llama"):
-		if strings.Contains(modelID, "70b") || strings.Contains(modelID, "65b") {
-			return 140 * 1024 * 1024 * 1024 // 140GB for 70B models
-		} else if strings.Contains(modelID, "34b") || strings.Contains(modelID, "33b") {
-			return 65 * 1024 * 1024 * 1024 // 65GB for 34B models
-		} else if strings.Contains(modelID, "13b") {
-			return 26 * 1024 * 1024 * 1024 // 26GB for 13B models
-		} else if strings.Contains(modelID, "7b") || strings.Contains(modelID, "8b") {
-			return 14 * 1024 * 1024 * 1024 // 14GB for 7B/8B models
-		}
-		return 10 * 1024 * 1024 * 1024 // Default estimate
-	case strings.Contains(modelID, "glm"):
-		if strings.Contains(modelID, "4.6") {
-			return 10 * 1024 * 1024 * 1024 // 10GB estimate for GLM-4.6
-		} else if strings.Contains(modelID, "4") {
-			return 8 * 1024 * 1024 * 1024 // 8GB estimate for GLM-4
-		}
-		return 6 * 1024 * 1024 * 1024 // Default for GLM models
-	default:
-		return 4 * 1024 * 1024 * 1024 // 4GB default estimate
-	}
+	// 使用模式匹配器获取大小估算
+	matchResult := c.patternMatcher.MatchModel(modelID)
+	return matchResult.SizeHint
 }
 
 func (c *ModelConverter) ExtractParameterSize(modelID string) string {
-	// Extract parameter size from model name
-	modelID = strings.ToLower(modelID)
-
-	switch {
-	case strings.Contains(modelID, "70b") || strings.Contains(modelID, "65b"):
-		return "70B"
-	case strings.Contains(modelID, "34b") || strings.Contains(modelID, "33b"):
-		return "34B"
-	case strings.Contains(modelID, "13b"):
-		return "13B"
-	case strings.Contains(modelID, "7b") || strings.Contains(modelID, "8b"):
-		return "7B"
-	case strings.Contains(modelID, "gpt-4"):
-		return "unknown"
-	case strings.Contains(modelID, "gpt-3.5"):
-		return "unknown"
-	case strings.Contains(modelID, "claude"):
-		return "unknown"
-	case strings.Contains(modelID, "glm-4.6"):
-		return "unknown"
-	default:
-		return "unknown"
-	}
+	// 使用模式匹配器获取参数大小
+	matchResult := c.patternMatcher.MatchModel(modelID)
+	return matchResult.ParamSize
 }
 
 func (c *ModelConverter) DetermineModelFamily(modelID string) string {
-	// Determine model family based on model name
-	modelID = strings.ToLower(modelID)
-
-	switch {
-	case strings.Contains(modelID, "gpt-4"):
-		return "gpt4"
-	case strings.Contains(modelID, "gpt-3.5"):
-		return "gpt3.5"
-	case strings.Contains(modelID, "claude"):
-		return "claude"
-	case strings.Contains(modelID, "llama"):
-		return "llama"
-	case strings.Contains(modelID, "glm"):
-		return "glm"
-	case strings.Contains(modelID, "mistral"):
-		return "mistral"
-	case strings.Contains(modelID, "codellama"):
-		return "codellama"
-	case strings.Contains(modelID, "qwen"):
-		return "qwen"
-	default:
-		return "unknown"
-	}
+	// 使用模式匹配器获取模型家族
+	matchResult := c.patternMatcher.MatchModel(modelID)
+	return matchResult.Family
 }

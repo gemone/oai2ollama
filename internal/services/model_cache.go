@@ -12,15 +12,22 @@ import (
 )
 
 type ModelCache struct {
-	config       *config.Config
-	clients      map[string]models.BackendClient
-	converter    *ModelConverter
+	config    *config.Config
+	clients   map[string]models.BackendClient
+	converter *ModelConverter
+	// 双缓存机制：主缓存和备用缓存
 	cachedModels map[string]models.OllamaModelInfo // model name -> model info
 	modelMap     map[string]string                 // model name -> backend name
+	// 备用缓存，用于异步更新
+	backupModels map[string]models.OllamaModelInfo
+	backupMap    map[string]string
 	mutex        sync.RWMutex
 	lastUpdate   time.Time
+	lastSuccess  time.Time // 最后成功更新时间
 	ticker       *time.Ticker
 	stopChan     chan bool
+	refreshing   bool            // 是否正在刷新
+	healthStatus map[string]bool // 后端健康状态
 }
 
 func NewModelCache(cfg *config.Config, clients map[string]models.BackendClient, converter *ModelConverter) *ModelCache {
@@ -30,8 +37,17 @@ func NewModelCache(cfg *config.Config, clients map[string]models.BackendClient, 
 		converter:    converter,
 		cachedModels: make(map[string]models.OllamaModelInfo),
 		modelMap:     make(map[string]string),
+		backupModels: make(map[string]models.OllamaModelInfo),
+		backupMap:    make(map[string]string),
 		lastUpdate:   time.Time{},
+		lastSuccess:  time.Time{},
 		stopChan:     make(chan bool),
+		healthStatus: make(map[string]bool),
+	}
+
+	// 初始化后端健康状态
+	for backendName := range clients {
+		cache.healthStatus[backendName] = true
 	}
 
 	// Start background refresh
@@ -41,7 +57,7 @@ func NewModelCache(cfg *config.Config, clients map[string]models.BackendClient, 
 }
 
 func (mc *ModelCache) startBackgroundRefresh() {
-	// Initial refresh
+	// 初始同步刷新（首次启动时需要）
 	mc.refreshModels()
 
 	// Start ticker for periodic refresh (every 5 minutes)
@@ -52,7 +68,8 @@ func (mc *ModelCache) startBackgroundRefresh() {
 		for {
 			select {
 			case <-mc.ticker.C:
-				mc.refreshModels()
+				// 异步刷新，不阻塞请求
+				go mc.asyncRefreshModels()
 			case <-mc.stopChan:
 				mc.ticker.Stop()
 				return
@@ -207,7 +224,208 @@ func (mc *ModelCache) refreshModels() {
 	}
 
 	mc.lastUpdate = time.Now()
+	mc.lastSuccess = time.Now()
 	log.Info("Model cache refreshed. Total models: %d", len(mc.cachedModels))
+}
+
+// asyncRefreshModels 异步刷新模型缓存，不阻塞读取请求
+func (mc *ModelCache) asyncRefreshModels() {
+	// 防止并发刷新
+	if mc.refreshing {
+		log.Debug("Model cache refresh already in progress, skipping")
+		return
+	}
+
+	mc.refreshing = true
+	defer func() {
+		mc.refreshing = false
+	}()
+
+	log.Info("Starting async model cache refresh...")
+
+	// 在备用缓存中构建新数据
+	newModels := make(map[string]models.OllamaModelInfo)
+	newModelMap := make(map[string]string)
+
+	// 收集模型时考虑后端健康状态
+	for backendName, backendClient := range mc.clients {
+		// 检查后端健康状态
+		if !mc.isBackendHealthy(backendName) {
+			log.Warnf("Backend %s is unhealthy, skipping refresh", backendName)
+			// 从现有缓存复制该后端的模型
+			mc.copyExistingBackendModels(backendName, newModels, newModelMap)
+			continue
+		}
+
+		openaiModels, err := backendClient.GetModels()
+		if err != nil {
+			log.Error("Failed to get models from backend %s: %v", backendName, err)
+			// 标记后端为不健康
+			mc.markBackendUnhealthy(backendName)
+			// 从现有缓存复制该后端的模型
+			mc.copyExistingBackendModels(backendName, newModels, newModelMap)
+			continue
+		}
+
+		// 标记后端为健康
+		mc.markBackendHealthy(backendName)
+
+		// 处理模型...（复用原有逻辑）
+		mc.processBackendModels(backendName, openaiModels, newModels, newModelMap)
+	}
+
+	// 原子性替换缓存
+	mc.mutex.Lock()
+	mc.backupModels = mc.cachedModels
+	mc.backupMap = mc.modelMap
+	mc.cachedModels = newModels
+	mc.modelMap = newModelMap
+	mc.lastUpdate = time.Now()
+	mc.lastSuccess = time.Now()
+	mc.mutex.Unlock()
+
+	log.Info("Async model cache refresh completed. Total models: %d", len(newModels))
+}
+
+// isBackendHealthy 检查后端是否健康
+func (mc *ModelCache) isBackendHealthy(backendName string) bool {
+	mc.mutex.RLock()
+	defer mc.mutex.RUnlock()
+	return mc.healthStatus[backendName]
+}
+
+// markBackendHealthy 标记后端为健康
+func (mc *ModelCache) markBackendHealthy(backendName string) {
+	mc.mutex.Lock()
+	defer mc.mutex.Unlock()
+	mc.healthStatus[backendName] = true
+}
+
+// markBackendUnhealthy 标记后端为不健康
+func (mc *ModelCache) markBackendUnhealthy(backendName string) {
+	mc.mutex.Lock()
+	defer mc.mutex.Unlock()
+	mc.healthStatus[backendName] = false
+}
+
+// copyExistingBackendModels 从现有缓存复制后端模型
+func (mc *ModelCache) copyExistingBackendModels(backendName string, newModels map[string]models.OllamaModelInfo, newModelMap map[string]string) {
+	mc.mutex.RLock()
+	defer mc.mutex.RUnlock()
+
+	for modelName, model := range mc.cachedModels {
+		if backend, exists := mc.modelMap[modelName]; exists && backend == backendName {
+			newModels[modelName] = model
+			newModelMap[modelName] = backendName
+		}
+	}
+}
+
+// processBackendModels 处理单个后端的模型
+func (mc *ModelCache) processBackendModels(backendName string, openaiModels []models.OpenAIModel, newModels map[string]models.OllamaModelInfo, newModelMap map[string]string) {
+	// 检查通配符配置
+	wildcardEnabled := false
+	var wildcardConfig *config.ModelConfig
+	for _, model := range mc.config.Models {
+		if model.Enabled && model.Name == "*" && model.Backend == backendName {
+			wildcardEnabled = true
+			wildcardConfig = &model
+			break
+		}
+	}
+
+	var backendConfig *config.BackendConfig
+	for _, backend := range mc.config.Backends {
+		if backend.Name == backendName {
+			backendConfig = &backend
+			break
+		}
+	}
+
+	var ollamaModels []models.OllamaModelInfo
+	if wildcardEnabled {
+		ollamaModels = mc.convertAllOpenAIModels(openaiModels, backendName, wildcardConfig, backendConfig)
+	} else {
+		ollamaModels = mc.converter.ConvertOpenAIModelsList(openaiModels)
+	}
+
+	// 添加到新缓存
+	for _, model := range ollamaModels {
+		newModels[model.Name] = model
+		newModelMap[model.Name] = backendName
+		if originalName, exists := model.Details["original_name"].(string); exists && originalName != model.Name {
+			newModelMap[originalName] = backendName
+		}
+	}
+
+	// 处理手动配置的模型
+	mc.processManualModels(backendName, newModels, newModelMap)
+}
+
+// processManualModels 处理手动配置的模型
+func (mc *ModelCache) processManualModels(backendName string, newModels map[string]models.OllamaModelInfo, newModelMap map[string]string) {
+	for _, model := range mc.config.Models {
+		if !model.Enabled || model.Backend != backendName {
+			continue
+		}
+
+		if model.Name == "*" {
+			continue // 通配符已处理
+		}
+
+		// 检查是否已存在
+		if _, exists := newModels[model.Name]; exists {
+			continue
+		}
+
+		// 获取后端客户端并验证模型
+		backendClient, exists := mc.clients[backendName]
+		if !exists {
+			continue
+		}
+
+		openaiModels, err := backendClient.GetModels()
+		if err != nil {
+			continue
+		}
+
+		var foundModel *models.OpenAIModel
+		originalModelName := model.OriginalName
+		if originalModelName == "" {
+			originalModelName = model.Name
+		}
+
+		for _, openaiModel := range openaiModels {
+			if openaiModel.ID == originalModelName {
+				foundModel = &openaiModel
+				break
+			}
+		}
+
+		if foundModel == nil {
+			continue
+		}
+
+		var backendConfig *config.BackendConfig
+		for _, backend := range mc.config.Backends {
+			if backend.Name == backendName {
+				backendConfig = &backend
+				break
+			}
+		}
+
+		customModel := mc.convertSingleModel(*foundModel, model.Name, backendName, backendConfig)
+
+		if len(model.Capabilities) > 0 {
+			customModel.Details["capabilities"] = model.Capabilities
+		}
+		if model.OriginalName != "" {
+			customModel.Details["original_name"] = model.OriginalName
+		}
+
+		newModels[model.Name] = customModel
+		newModelMap[model.Name] = backendName
+	}
 }
 
 func (mc *ModelCache) GetAllModels() []models.OllamaModelInfo {
@@ -323,10 +541,22 @@ func (mc *ModelCache) GetCacheInfo() map[string]interface{} {
 	mc.mutex.RLock()
 	defer mc.mutex.RUnlock()
 
+	// 计算健康后端数量
+	healthyBackends := 0
+	for _, healthy := range mc.healthStatus {
+		if healthy {
+			healthyBackends++
+		}
+	}
+
 	return map[string]interface{}{
-		"total_models": len(mc.cachedModels),
-		"last_update":  mc.lastUpdate,
-		"backends":     len(mc.clients),
+		"total_models":     len(mc.cachedModels),
+		"last_update":      mc.lastUpdate,
+		"last_success":     mc.lastSuccess,
+		"backends":         len(mc.clients),
+		"healthy_backends": healthyBackends,
+		"refreshing":       mc.refreshing,
+		"health_status":    mc.healthStatus,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gemone/oai2ollama/internal/models"
@@ -14,6 +15,17 @@ import (
 type MetricsService struct {
 	db     *sql.DB
 	config models.MetricsConfig
+	// 异步写入相关
+	metricBuffer  chan *models.APIMetrics
+	bufferSize    int
+	flushInterval time.Duration
+	stopChan      chan bool
+	wg            sync.WaitGroup
+	mutex         sync.RWMutex
+	// 统计信息
+	metricsWritten int64
+	metricsDropped int64
+	lastFlushTime  time.Time
 }
 
 func NewMetricsService(config models.MetricsConfig) (*MetricsService, error) {
@@ -30,15 +42,28 @@ func NewMetricsService(config models.MetricsConfig) (*MetricsService, error) {
 	db.SetMaxOpenConns(config.MaxConnections)
 	db.SetMaxIdleConns(config.MaxConnections / 2)
 
+	// 配置异步写入参数
+	bufferSize := 1000               // 默认缓冲1000条记录
+	flushInterval := 5 * time.Second // 默认5秒刷新一次
+
 	service := &MetricsService{
-		db:     db,
-		config: config,
+		db:            db,
+		config:        config,
+		metricBuffer:  make(chan *models.APIMetrics, bufferSize),
+		bufferSize:    bufferSize,
+		flushInterval: flushInterval,
+		stopChan:      make(chan bool),
+		lastFlushTime: time.Now(),
 	}
 
 	// Initialize database schema
 	if err := service.initSchema(); err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics schema: %w", err)
 	}
+
+	// 启动异步写入处理
+	service.wg.Add(1)
+	go service.asyncMetricsWriter()
 
 	// Start background cleanup and aggregation
 	go service.startBackgroundTasks()
@@ -89,6 +114,74 @@ func (ms *MetricsService) RecordMetric(metric *models.APIMetrics) error {
 		metric.ClientIP = ms.anonymizeIP(metric.ClientIP)
 	}
 
+	// 异步写入：尝试发送到缓冲区
+	select {
+	case ms.metricBuffer <- metric:
+		// 成功发送到缓冲区
+		return nil
+	default:
+		// 缓冲区满，丢弃指标并记录
+		ms.mutex.Lock()
+		ms.metricsDropped++
+		ms.mutex.Unlock()
+		log.Warnf("Metrics buffer full, dropping metric for %s %s", metric.Method, metric.Endpoint)
+		return fmt.Errorf("metrics buffer full")
+	}
+}
+
+// asyncMetricsWriter 异步写入metrics到数据库
+func (ms *MetricsService) asyncMetricsWriter() {
+	defer ms.wg.Done()
+
+	ticker := time.NewTicker(ms.flushInterval)
+	defer ticker.Stop()
+
+	var batch []*models.APIMetrics
+
+	for {
+		select {
+		case metric := <-ms.metricBuffer:
+			batch = append(batch, metric)
+
+			// 如果批次达到一定大小，立即写入
+			if len(batch) >= 100 {
+				ms.flushBatch(batch)
+				batch = batch[:0] // 清空切片但保留容量
+			}
+
+		case <-ticker.C:
+			// 定期刷新
+			if len(batch) > 0 {
+				ms.flushBatch(batch)
+				batch = batch[:0]
+			}
+
+		case <-ms.stopChan:
+			// 服务停止，刷新剩余数据
+			if len(batch) > 0 {
+				ms.flushBatch(batch)
+			}
+			return
+		}
+	}
+}
+
+// flushBatch 批量写入metrics到数据库
+func (ms *MetricsService) flushBatch(batch []*models.APIMetrics) {
+	if len(batch) == 0 {
+		return
+	}
+
+	start := time.Now()
+
+	// 开始事务
+	tx, err := ms.db.Begin()
+	if err != nil {
+		log.Errorf("Failed to begin transaction for metrics batch: %v", err)
+		return
+	}
+
+	// 准备批量插入语句
 	query := `
 	INSERT INTO api_metrics (
 		timestamp, method, endpoint, model, backend, status, duration,
@@ -97,19 +190,47 @@ func (ms *MetricsService) RecordMetric(metric *models.APIMetrics) error {
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err := ms.db.Exec(query,
-		metric.Timestamp, metric.Method, metric.Endpoint, metric.Model, metric.Backend,
-		metric.Status, metric.Duration, metric.PromptTokens, metric.TotalTokens,
-		metric.RequestSize, metric.ResponseSize, metric.UserAgent, metric.ClientIP,
-		metric.RequestID, metric.Streaming, metric.Error,
-	)
-
+	stmt, err := tx.Prepare(query)
 	if err != nil {
-		log.Errorf("Failed to record metric: %v", err)
-		return err
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			log.Errorf("Failed to rollback transaction: %v", rollbackErr)
+		}
+		log.Errorf("Failed to prepare statement for metrics batch: %v", err)
+		return
+	}
+	defer stmt.Close()
+
+	// 执行批量插入
+	for _, metric := range batch {
+		_, err := stmt.Exec(
+			metric.Timestamp, metric.Method, metric.Endpoint, metric.Model, metric.Backend,
+			metric.Status, metric.Duration, metric.PromptTokens, metric.TotalTokens,
+			metric.RequestSize, metric.ResponseSize, metric.UserAgent, metric.ClientIP,
+			metric.RequestID, metric.Streaming, metric.Error,
+		)
+		if err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				log.Errorf("Failed to rollback transaction: %v", rollbackErr)
+			}
+			log.Errorf("Failed to insert metric in batch: %v", err)
+			return
+		}
 	}
 
-	return nil
+	// 提交事务
+	if err := tx.Commit(); err != nil {
+		log.Errorf("Failed to commit metrics batch: %v", err)
+		return
+	}
+
+	// 更新统计信息
+	ms.mutex.Lock()
+	ms.metricsWritten += int64(len(batch))
+	ms.lastFlushTime = time.Now()
+	ms.mutex.Unlock()
+
+	duration := time.Since(start)
+	log.Debugf("Flushed %d metrics in %v", len(batch), duration)
 }
 
 func (ms *MetricsService) GetMetrics(filter models.MetricsFilter) ([]models.APIMetrics, error) {

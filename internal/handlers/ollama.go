@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gemone/oai2ollama/internal/config"
@@ -14,6 +16,7 @@ import (
 	"github.com/gemone/oai2ollama/internal/models"
 	"github.com/gemone/oai2ollama/internal/services"
 	"github.com/gemone/oai2ollama/pkg/client"
+	"github.com/gemone/oai2ollama/pkg/utils"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/log"
 )
@@ -24,6 +27,10 @@ type OllamaHandler struct {
 	config         *config.Config
 	modelCache     *services.ModelCache
 	metricsService *services.MetricsService
+
+	// 流式处理优化
+	bufferPool    sync.Pool
+	sseBufferPool sync.Pool
 }
 
 func NewOllamaHandler(cfg *config.Config) *OllamaHandler {
@@ -31,6 +38,20 @@ func NewOllamaHandler(cfg *config.Config) *OllamaHandler {
 		converter:      services.NewModelConverter(cfg),
 		backendClients: make(map[string]models.BackendClient),
 		config:         cfg,
+	}
+
+	// 初始化缓冲池
+	handler.bufferPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+
+	handler.sseBufferPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 0, 256) // 预分配256字节
+			return &buf
+		},
 	}
 
 	// Initialize backend clients
@@ -550,6 +571,10 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 			Error: fmt.Sprintf("Failed to start stream: %v", err),
 		})
 	}
+
+	// 获取写入器
+	writer := c.Response().BodyWriter()
+
 	// Stream responses
 	for response := range ch {
 		if len(response.Choices) > 0 {
@@ -562,9 +587,8 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 					Done:      false,
 				}
 
-				// Send as SSE
-				data := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(generateResponse))
-				if _, err := c.WriteString(data); err != nil {
+				// 优化的SSE写入
+				if err := h.writeSSEData(writer, generateResponse); err != nil {
 					return fmt.Errorf("failed to write SSE data: %w", err)
 				}
 			}
@@ -577,8 +601,8 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 				CreatedAt: time.Now(),
 				Done:      true,
 			}
-			finalData := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(finalResponse))
-			if _, err := c.WriteString(finalData); err != nil {
+
+			if err := h.writeSSEData(writer, finalResponse); err != nil {
 				return fmt.Errorf("failed to write final SSE data: %w", err)
 			}
 			break
@@ -586,8 +610,51 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 	}
 
 	// Send done signal
-	if _, err := c.WriteString("data: [DONE]\n\n"); err != nil {
+	if _, err := writer.Write([]byte("data: [DONE]\n\n")); err != nil {
 		return fmt.Errorf("failed to write SSE done signal: %w", err)
+	}
+
+	return nil
+}
+
+// writeSSEData 优化的SSE数据写入
+func (h *OllamaHandler) writeSSEData(writer io.Writer, data interface{}) error {
+	// 使用缓冲池序列化JSON
+	jsonData := h.marshalJSON(data)
+
+	// 使用预分配的缓冲区构建SSE格式
+	bufPtr := h.sseBufferPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer func() {
+		// 重置长度但保留容量，直接放回指针
+		*bufPtr = buf[:0]
+		h.sseBufferPool.Put(bufPtr)
+	}()
+
+	// 构建 "data: {json}\n\n" 格式
+	buf = append(buf, "data: "...)
+	buf = append(buf, jsonData...)
+	buf = append(buf, '\n', '\n')
+
+	// 写入数据
+	_, err := writer.Write(buf)
+	return err
+}
+
+// writeSSEDataToWriter 为bufio.Writer优化的SSE数据写入
+func (h *OllamaHandler) writeSSEDataToWriter(writer *bufio.Writer, data interface{}) error {
+	// 使用缓冲池序列化JSON
+	jsonData := h.marshalJSON(data)
+
+	// 直接写入bufio.Writer，避免额外的内存分配
+	if _, err := writer.WriteString("data: "); err != nil {
+		return err
+	}
+	if _, err := writer.Write(jsonData); err != nil {
+		return err
+	}
+	if _, err := writer.WriteString("\n\n"); err != nil {
+		return err
 	}
 
 	return nil
@@ -905,16 +972,10 @@ stop                           "Assistant:"`
 	return c.JSON(response)
 }
 
-// Helper function
-func mustMarshalJSON(v interface{}) []byte {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return []byte("{}")
-	}
-	return data
-}
-
-// Universal chat completion processing function
+// 优化的JSON序列化函数，使用缓冲池
+func (h *OllamaHandler) marshalJSON(v interface{}) []byte {
+	return utils.MustMarshalJSON(v)
+} // Universal chat completion processing function
 func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.OpenAIChatCompletionRequest, returnOpenAIFormat bool) error {
 	log.Debug("ProcessChatCompletion called")
 
@@ -1208,15 +1269,17 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 					log.Debugf("[%s] Received chunk %d from backend", requestID, chunkCount)
 				}
 
-				var data string
 				if returnOpenAIFormat {
 					// For OpenAI format, create a copy and restore the original model name
 					responseCopy := response
 					if len(prefixedModel) > 0 {
 						responseCopy.Model = prefixedModel[0]
 					}
-					// Send as SSE in OpenAI format
-					data = fmt.Sprintf("data: %s\n\n", mustMarshalJSON(responseCopy))
+					// 优化的SSE写入
+					if err := h.writeSSEDataToWriter(w, responseCopy); err != nil {
+						log.Debugf("[%s] Failed to write streaming response for chunk %d: %v", requestID, chunkCount, err)
+						return
+					}
 				} else {
 					// Convert to Ollama format for /api/chat compatibility
 					if len(response.Choices) > 0 && response.Choices[0].Delta != nil {
@@ -1227,17 +1290,15 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 							Done:      false,
 						}
 
-						data = fmt.Sprintf("data: %s\n\n", mustMarshalJSON(ollamaResponse))
+						// 优化的SSE写入
+						if err := h.writeSSEDataToWriter(w, ollamaResponse); err != nil {
+							log.Debugf("[%s] Failed to write streaming response for chunk %d: %v", requestID, chunkCount, err)
+							return
+						}
 					} else {
 						// Skip if no delta content
 						continue
 					}
-				}
-
-				// Write data directly to stream
-				if _, err := w.WriteString(data); err != nil {
-					log.Debugf("[%s] Failed to write streaming response for chunk %d: %v", requestID, chunkCount, err)
-					return
 				}
 
 				// Flush to ensure immediate delivery to client
@@ -1269,7 +1330,15 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 							Done:      true,
 						}
 
-						doneData = fmt.Sprintf("data: %s\n\n", mustMarshalJSON(finalResponse))
+						// 优化的SSE写入
+						if err := h.writeSSEDataToWriter(w, finalResponse); err != nil {
+							log.Debugf("[%s] Failed to write final streaming response: %v", requestID, err)
+							return
+						}
+						// Final flush
+						w.Flush()
+						log.Debugf("[%s] Streaming completed successfully (total chunks: %d)", requestID, chunkCount)
+						return
 					}
 
 					if _, err := w.WriteString(doneData); err != nil {
@@ -1298,21 +1367,21 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 				log.Debugf("[%s] Fallback non-streaming request failed: %v", requestID, err)
 				// Send error response
 				if returnOpenAIFormat {
-					errorData := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(models.ErrorResponse{
+					errorResp := models.ErrorResponse{
 						Error: models.APIError{
 							Message: fmt.Sprintf("Streaming not supported and fallback failed: %v", err),
 							Type:    "api_error",
 							Code:    "streaming_fallback_failed",
 						},
-					}))
-					if _, writeErr := w.WriteString(errorData); writeErr != nil {
+					}
+					if writeErr := h.writeSSEDataToWriter(w, errorResp); writeErr != nil {
 						log.Debugf("Failed to write error data: %v", writeErr)
 					}
 				} else {
-					errorData := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(models.OllamaErrorResponse{
+					errorResp := models.OllamaErrorResponse{
 						Error: fmt.Sprintf("Streaming not supported and fallback failed: %v", err),
-					}))
-					if _, writeErr := w.WriteString(errorData); writeErr != nil {
+					}
+					if writeErr := h.writeSSEDataToWriter(w, errorResp); writeErr != nil {
 						log.Debugf("Failed to write error data: %v", writeErr)
 					}
 				}
@@ -1327,8 +1396,7 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 				if len(prefixedModel) > 0 {
 					responseCopy.Model = prefixedModel[0]
 				}
-				data := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(responseCopy))
-				if _, err := w.WriteString(data); err != nil {
+				if err := h.writeSSEDataToWriter(w, responseCopy); err != nil {
 					log.Debugf("[%s] Failed to write fallback response: %v", requestID, err)
 				} else {
 					w.Flush()
@@ -1351,8 +1419,7 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 						Message:   models.OpenAIToOllamaMessage(response.Choices[0].Message),
 						Done:      true,
 					}
-					data := fmt.Sprintf("data: %s\n\n", mustMarshalJSON(ollamaResponse))
-					if _, err := w.WriteString(data); err != nil {
+					if err := h.writeSSEDataToWriter(w, ollamaResponse); err != nil {
 						log.Debugf("[%s] Failed to write fallback Ollama response: %v", requestID, err)
 					} else {
 						w.Flush()
