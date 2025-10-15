@@ -234,7 +234,7 @@ func (mpm *ModelPatternMatcher) MatchModel(modelID string) *ModelMatchResult {
 	modelID = strings.ToLower(modelID)
 
 	var bestMatch *ModelMatchResult
-	var highestScore int = 0
+	var highestScore = 0
 
 	mpm.mu.RLock()
 	defer mpm.mu.RUnlock()

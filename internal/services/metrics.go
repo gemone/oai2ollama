@@ -198,7 +198,11 @@ func (ms *MetricsService) flushBatch(batch []*models.APIMetrics) {
 		log.Errorf("Failed to prepare statement for metrics batch: %v", err)
 		return
 	}
-	defer stmt.Close()
+	defer func() {
+		if err := stmt.Close(); err != nil {
+			log.Errorf("Failed to close statement: %v", err)
+		}
+	}()
 
 	// 执行批量插入
 	for _, metric := range batch {
@@ -304,7 +308,11 @@ func (ms *MetricsService) GetMetrics(filter models.MetricsFilter) ([]models.APIM
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Errorf("Failed to close rows: %v", err)
+		}
+	}()
 
 	var metrics []models.APIMetrics
 	for rows.Next() {
@@ -406,7 +414,11 @@ func (ms *MetricsService) getTopModels(filter models.MetricsFilter, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Errorf("Failed to close rows: %v", err)
+		}
+	}()
 
 	var modelUsage []models.ModelUsage
 	for rows.Next() {
@@ -443,7 +455,11 @@ func (ms *MetricsService) getTopBackends(filter models.MetricsFilter, limit int)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Errorf("Failed to close rows: %v", err)
+		}
+	}()
 
 	var backendUsage []models.BackendUsage
 	for rows.Next() {
@@ -477,7 +493,11 @@ func (ms *MetricsService) getHourlyStats(filter models.MetricsFilter, hours int)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Errorf("Failed to close rows: %v", err)
+		}
+	}()
 
 	var stats []models.HourlyStats
 	for rows.Next() {
@@ -512,7 +532,11 @@ func (ms *MetricsService) getDailyStats(filter models.MetricsFilter, days int) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Errorf("Failed to close rows: %v", err)
+		}
+	}()
 
 	var stats []models.DailyStats
 	for rows.Next() {

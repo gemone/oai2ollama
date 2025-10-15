@@ -1336,7 +1336,9 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 							return
 						}
 						// Final flush
-						w.Flush()
+						if err := w.Flush(); err != nil {
+							log.Debugf("[%s] Failed to flush final streaming response: %v", requestID, err)
+						}
 						log.Debugf("[%s] Streaming completed successfully (total chunks: %d)", requestID, chunkCount)
 						return
 					}
@@ -1345,7 +1347,9 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 						log.Debugf("[%s] Failed to write final streaming response: %v", requestID, err)
 					} else {
 						// Final flush
-						w.Flush()
+						if err := w.Flush(); err != nil {
+							log.Debugf("[%s] Failed to flush final streaming response: %v", requestID, err)
+						}
 					}
 					log.Debugf("[%s] Streaming completed successfully (total chunks: %d)", requestID, chunkCount)
 					return
@@ -1385,7 +1389,9 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 						log.Debugf("Failed to write error data: %v", writeErr)
 					}
 				}
-				w.Flush()
+				if err := w.Flush(); err != nil {
+					log.Debugf("Failed to flush error response: %v", err)
+				}
 				return
 			}
 
@@ -1399,7 +1405,9 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 				if err := h.writeSSEDataToWriter(w, responseCopy); err != nil {
 					log.Debugf("[%s] Failed to write fallback response: %v", requestID, err)
 				} else {
-					w.Flush()
+					if err := w.Flush(); err != nil {
+						log.Debugf("[%s] Failed to flush fallback response: %v", requestID, err)
+					}
 					log.Debugf("[%s] Sent fallback response as single chunk", requestID)
 				}
 
@@ -1408,7 +1416,9 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 				if _, err := w.WriteString(doneData); err != nil {
 					log.Debugf("[%s] Failed to write fallback done signal: %v", requestID, err)
 				} else {
-					w.Flush()
+					if err := w.Flush(); err != nil {
+						log.Debugf("[%s] Failed to flush fallback done signal: %v", requestID, err)
+					}
 				}
 			} else {
 				// Convert to Ollama format
@@ -1422,7 +1432,9 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 					if err := h.writeSSEDataToWriter(w, ollamaResponse); err != nil {
 						log.Debugf("[%s] Failed to write fallback Ollama response: %v", requestID, err)
 					} else {
-						w.Flush()
+						if err := w.Flush(); err != nil {
+							log.Debugf("[%s] Failed to flush fallback Ollama response: %v", requestID, err)
+						}
 						log.Debugf("[%s] Sent fallback Ollama response as single chunk", requestID)
 					}
 				}

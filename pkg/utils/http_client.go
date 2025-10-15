@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/gofiber/fiber/v2/log"
 )
 
 var (
@@ -85,7 +87,11 @@ func detectHTTP2Support(baseURL string, timeout time.Duration) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	// 检查响应是否使用HTTP/2
 	return resp.Proto == "HTTP/2.0"

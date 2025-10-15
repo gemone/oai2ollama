@@ -80,7 +80,11 @@ func (c *OpenAIClient) GetModels() ([]models.OpenAIModel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get models: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -127,7 +131,11 @@ func (c *OpenAIClient) ChatCompletion(request *models.OpenAIChatCompletionReques
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete chat: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -178,14 +186,20 @@ func (c *OpenAIClient) StreamChatCompletion(ctx context.Context, request *models
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("Failed to close response body: %v", err)
+		}
 		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	ch := make(chan models.OpenAIChatCompletionResponse)
 
 	go func() {
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				log.Errorf("Failed to close response body: %v", err)
+			}
+		}()
 		defer close(ch)
 
 		reader := bufio.NewReader(resp.Body)
@@ -272,7 +286,11 @@ func (c *OpenAIClient) GenerateEmbeddings(request *models.OllamaEmbeddingsReques
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embeddings: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Errorf("Failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
