@@ -208,6 +208,7 @@ func main() {
 					"version":    "GET /api/version",
 				},
 				"openai_api": map[string]string{
+					"models":           "GET /v1/models",
 					"chat_completions": "POST /v1/chat/completions",
 				},
 			},
@@ -263,6 +264,7 @@ func setupRoutes(app *fiber.App, ollamaHandler *handlers.OllamaHandler) {
 
 	// OpenAI API compatible endpoints
 	v1 := app.Group("/v1")
+	v1.Get("/models", ollamaHandler.ListModelsOpenAI)        // OpenAI compatible models list
 	v1.Post("/chat/completions", ollamaHandler.ChatCompletions) // OpenAI compatible chat completions
 
 	// Metrics API endpoints

@@ -366,6 +366,41 @@ func (h *OllamaHandler) ListModels(c *fiber.Ctx) error {
 	return c.JSON(response)
 }
 
+// GET /v1/models - List models (OpenAI compatible)
+func (h *OllamaHandler) ListModelsOpenAI(c *fiber.Ctx) error {
+	// Get all models from cache
+	allModels := h.modelCache.GetAllModels()
+
+	// Convert to OpenAI format
+	var openaiModels []models.OpenAIModel
+	for _, model := range allModels {
+		// Extract backend info
+		backendName := "unknown"
+		ownedBy := "oai2ollama"
+
+		if details, ok := model.Details["backend"].(string); ok {
+			backendName = details
+		}
+
+		// Create OpenAI model entry
+		openaiModel := models.OpenAIModel{
+			ID:      model.Name,
+			Object:  "model",
+			Created: model.ModifiedAt.Unix(),
+			OwnedBy: fmt.Sprintf("%s:%s", backendName, ownedBy),
+		}
+
+		openaiModels = append(openaiModels, openaiModel)
+	}
+
+	response := models.OpenAIModelsResponse{
+		Object: "list",
+		Data:   openaiModels,
+	}
+
+	return c.JSON(response)
+}
+
 // POST /api/chat - Chat completion
 func (h *OllamaHandler) Chat(c *fiber.Ctx) error {
 	// Parse Ollama request
@@ -454,6 +489,14 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 
 	log.Debugf("Request body: %s", string(c.Body()))
 
+	// Log generate input (which gets converted to chat internally)
+	if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+		log.Debugf("Generate Input - Model: %s, Prompt: %.200s", request.Model, request.Prompt)
+		if len(request.Prompt) > 200 {
+			log.Debugf("Generate Input - Prompt (truncated, total length=%d)", len(request.Prompt))
+		}
+	}
+
 	// Parse model name to get original name for backend call
 	// log.Debugf("Request body: %s", string(c.Body())) // Removed to avoid logging sensitive information
 	if h.converter == nil {
@@ -511,9 +554,16 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 	// Get backend for this model using cache
 	backendName, err := h.modelCache.GetBackendForModel(request.Model)
 	if err != nil {
-		return c.Status(404).JSON(models.OllamaErrorResponse{
-			Error: fmt.Sprintf("Model not found: %s", request.Model),
-		})
+		// Try to find a fallback backend
+		fallbackBackend := h.findFallbackBackend(request.Model)
+		if fallbackBackend != "" {
+			log.Infof("Using fallback backend '%s' for model '%s'", fallbackBackend, request.Model)
+			backendName = fallbackBackend
+		} else {
+			return c.Status(404).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Model not found: %s", request.Model),
+			})
+		}
 	}
 
 	backendClient, exists := h.backendClients[backendName]
@@ -537,11 +587,28 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 	}
 
 	// Convert to generate format
+	if len(response.Choices) == 0 {
+		return c.Status(500).JSON(models.OllamaErrorResponse{
+			Error: "Backend returned empty choices",
+		})
+	}
+
+	responseContent := response.Choices[0].Message.Content.(string)
 	generateResponse := models.OllamaGenerateResponse{
-		Model:    request.Model,
-		Response: response.Choices[0].Message.Content.(string),
-		Done:     true,
-		Context:  request.Context,
+		Model:      request.Model,
+		CreatedAt:  time.Now(),
+		Response:   responseContent,
+		Done:       true,
+		DoneReason: response.Choices[0].FinishReason,
+		Context:    request.Context,
+	}
+
+	// Log generate output for debugging
+	if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+		log.Debugf("Generate Output - Model: %s, Response: %.300s", request.Model, responseContent)
+		if len(responseContent) > 300 {
+			log.Debugf("Generate Output - Response (truncated, total length=%d)", len(responseContent))
+		}
 	}
 
 	if response.Usage != nil {
@@ -551,6 +618,12 @@ func (h *OllamaHandler) Generate(c *fiber.Ctx) error {
 		// Record token usage in response headers for middleware
 		middleware.SetTokenUsage(c, response.Usage.PromptTokens,
 			response.Usage.CompletionTokens, response.Usage.TotalTokens)
+
+		// Log token usage for debugging
+		if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+			log.Debugf("Generate Token Usage - Prompt: %d, Completion: %d, Total: %d",
+				response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens)
+		}
 	}
 
 	return c.JSON(generateResponse)
@@ -562,57 +635,91 @@ func (h *OllamaHandler) handleStreamingGenerate(c *fiber.Ctx, backendClient mode
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("Access-Control-Allow-Origin", "*")
+	c.Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
-	// Start streaming (thinking detection is handled inside the client)
-	ch, err := backendClient.StreamChatCompletion(c.Context(), request)
+	// Enable streaming mode for fasthttp
+	c.Response().SetBodyStreamWriter(func(w *bufio.Writer) {
+		// Start streaming (thinking detection is handled inside the client)
+		ch, err := backendClient.StreamChatCompletion(c.Context(), request)
 
-	if err != nil {
-		return c.Status(500).JSON(models.OllamaErrorResponse{
-			Error: fmt.Sprintf("Failed to start stream: %v", err),
-		})
-	}
+		if err != nil {
+			errorResp := models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Failed to start stream: %v", err),
+			}
+			if writeErr := h.writeSSEDataToWriter(w, errorResp); writeErr != nil {
+				log.Debugf("Failed to write error data: %v", writeErr)
+			}
+			if flushErr := w.Flush(); flushErr != nil {
+				log.Debugf("Failed to flush error response: %v", flushErr)
+			}
+			return
+		}
 
-	// 获取写入器
-	writer := c.Response().BodyWriter()
+		// Stream responses
+		for response := range ch {
+			if len(response.Choices) > 0 {
+				if contentStr, ok := response.Choices[0].Delta.Content.(string); ok && contentStr != "" {
+					// Log streaming generate output for debugging
+					if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+						log.Debugf("Streaming Generate Chunk - Model: %s, Content: %.100s", request.Model, contentStr)
+						if len(contentStr) > 100 {
+							log.Debugf("Streaming Generate Chunk - Content (truncated, total length=%d)", len(contentStr))
+						}
+					}
 
-	// Stream responses
-	for response := range ch {
-		if len(response.Choices) > 0 {
-			if contentStr, ok := response.Choices[0].Delta.Content.(string); ok && contentStr != "" {
-				// Convert to generate format
-				generateResponse := models.OllamaGenerateResponse{
+					// Convert to generate format
+					generateResponse := models.OllamaGenerateResponse{
+						Model:     request.Model,
+						CreatedAt: time.Now(),
+						Response:  contentStr,
+						Done:      false,
+					}
+
+					// 优化的SSE写入并立即刷新
+					if err := h.writeSSEDataToWriter(w, generateResponse); err != nil {
+						log.Debugf("Failed to write SSE data: %v", err)
+						return
+					}
+
+					// 立即刷新缓冲区确保数据实时发送
+					if err := w.Flush(); err != nil {
+						log.Debugf("Failed to flush SSE data: %v", err)
+						return
+					}
+				}
+			}
+
+			if len(response.Choices) > 0 && response.Choices[0].FinishReason != "" {
+				// Send final chunk
+				finalResponse := &models.OllamaGenerateResponse{
 					Model:     request.Model,
 					CreatedAt: time.Now(),
-					Response:  contentStr,
-					Done:      false,
+					Done:      true,
 				}
 
-				// 优化的SSE写入
-				if err := h.writeSSEData(writer, generateResponse); err != nil {
-					return fmt.Errorf("failed to write SSE data: %w", err)
+				if err := h.writeSSEDataToWriter(w, finalResponse); err != nil {
+					log.Debugf("Failed to write final SSE data: %v", err)
+					return
 				}
+
+				// 刷新最终响应
+				if err := w.Flush(); err != nil {
+					log.Debugf("Failed to flush final SSE data: %v", err)
+				}
+				break
 			}
 		}
 
-		if len(response.Choices) > 0 && response.Choices[0].FinishReason != "" {
-			// Send final chunk
-			finalResponse := &models.OllamaGenerateResponse{
-				Model:     request.Model,
-				CreatedAt: time.Now(),
-				Done:      true,
+		// Send done signal
+		if _, err := w.WriteString("data: [DONE]\n\n"); err != nil {
+			log.Debugf("Failed to write SSE done signal: %v", err)
+		} else {
+			// 最终刷新确保完成信号发送
+			if err := w.Flush(); err != nil {
+				log.Debugf("Failed to flush SSE done signal: %v", err)
 			}
-
-			if err := h.writeSSEData(writer, finalResponse); err != nil {
-				return fmt.Errorf("failed to write final SSE data: %w", err)
-			}
-			break
 		}
-	}
-
-	// Send done signal
-	if _, err := writer.Write([]byte("data: [DONE]\n\n")); err != nil {
-		return fmt.Errorf("failed to write SSE done signal: %w", err)
-	}
+	})
 
 	return nil
 }
@@ -699,9 +806,16 @@ func (h *OllamaHandler) Embeddings(c *fiber.Ctx) error {
 	// Get backend for this model using cache
 	backendName, err := h.modelCache.GetBackendForModel(request.Model)
 	if err != nil {
-		return c.Status(404).JSON(models.OllamaErrorResponse{
-			Error: fmt.Sprintf("Model not found: %s", request.Model),
-		})
+		// Try to find a fallback backend
+		fallbackBackend := h.findFallbackBackend(request.Model)
+		if fallbackBackend != "" {
+			log.Infof("Using fallback backend '%s' for model '%s'", fallbackBackend, request.Model)
+			backendName = fallbackBackend
+		} else {
+			return c.Status(404).JSON(models.OllamaErrorResponse{
+				Error: fmt.Sprintf("Model not found: %s", request.Model),
+			})
+		}
 	}
 
 	backendClient, exists := h.backendClients[backendName]
@@ -982,6 +1096,21 @@ func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.Open
 	log.Debugf("Parsed request: Model=%s, MessagesCount=%d, Stream=%t",
 		request.Model, len(request.Messages), request.Stream)
 
+	// Log chat input (user messages) for debugging
+	if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+		log.Debugf("Chat Input - Model: %s", request.Model)
+		for i, msg := range request.Messages {
+			if contentStr, ok := msg.Content.(string); ok {
+				log.Debugf("Message[%d]: Role=%s, Content=%.100s", i, msg.Role, contentStr)
+				if len(contentStr) > 100 {
+					log.Debugf("Message[%d]: Content (truncated, total length=%d)", i, len(contentStr))
+				}
+			} else {
+				log.Debugf("Message[%d]: Role=%s, Content: [non-string content]", i, msg.Role)
+			}
+		}
+	}
+
 	// Validate request
 	if request.Model == "" {
 		log.Debug("Model validation failed - empty model")
@@ -1024,19 +1153,28 @@ func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.Open
 	backendName, err := h.modelCache.GetBackendForModel(request.Model)
 	if err != nil {
 		log.Debugf("Backend lookup failed: %v", err)
-		if returnOpenAIFormat {
-			return c.Status(404).JSON(models.ErrorResponse{
-				Error: models.APIError{
-					Message: fmt.Sprintf("Model not found: %s", request.Model),
-					Type:    "invalid_request_error",
-					Code:    "model_not_found",
-					Param:   "model",
-				},
-			})
+
+		// Try to find a fallback backend by checking if any backend can handle this model
+		fallbackBackend := h.findFallbackBackend(request.Model)
+		if fallbackBackend != "" {
+			log.Infof("Using fallback backend '%s' for model '%s'", fallbackBackend, request.Model)
+			backendName = fallbackBackend
 		} else {
-			return c.Status(404).JSON(models.OllamaErrorResponse{
-				Error: fmt.Sprintf("Model not found: %s", request.Model),
-			})
+			log.Debugf("No fallback backend found for model: %s", request.Model)
+			if returnOpenAIFormat {
+				return c.Status(404).JSON(models.ErrorResponse{
+					Error: models.APIError{
+						Message: fmt.Sprintf("Model not found: %s", request.Model),
+						Type:    "invalid_request_error",
+						Code:    "model_not_found",
+						Param:   "model",
+					},
+				})
+			} else {
+				return c.Status(404).JSON(models.OllamaErrorResponse{
+					Error: fmt.Sprintf("Model not found: %s", request.Model),
+				})
+			}
 		}
 	}
 
@@ -1136,10 +1274,55 @@ func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.Open
 
 	log.Debug("ChatCompletion succeeded")
 
+	// Check if response has choices
+	if len(response.Choices) == 0 {
+		errorMsg := "Backend returned empty choices"
+		if returnOpenAIFormat {
+			return c.Status(500).JSON(models.ErrorResponse{
+				Error: models.APIError{
+					Message: errorMsg,
+					Type:    "api_error",
+					Code:    "empty_choices",
+				},
+			})
+		} else {
+			return c.Status(500).JSON(models.OllamaErrorResponse{
+				Error: errorMsg,
+			})
+		}
+	}
+
+	// Process think tags in response message if OpenAI format
+	if len(response.Choices) > 0 && returnOpenAIFormat {
+		response.Choices[0].Message = models.ProcessThinkTags(response.Choices[0].Message)
+	}
+
+	// Log chat output (assistant response) for debugging
+	if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug && len(response.Choices) > 0 {
+		if content, ok := response.Choices[0].Message.Content.(string); ok {
+			log.Debugf("Chat Output - Model: %s, Role: assistant, Content=%.200s", request.Model, content)
+			if len(content) > 200 {
+				log.Debugf("Chat Output - Response truncated (total length=%d)", len(content))
+			}
+		} else {
+			log.Debugf("Chat Output - Model: %s, Role: assistant, Content: [non-string content]", request.Model)
+		}
+
+		if response.Choices[0].FinishReason != "" {
+			log.Debugf("Chat Output - Finish Reason: %s", response.Choices[0].FinishReason)
+		}
+	}
+
 	// Record token usage in response headers for middleware
 	if response.Usage != nil {
 		middleware.SetTokenUsage(c, response.Usage.PromptTokens,
 			response.Usage.CompletionTokens, response.Usage.TotalTokens)
+
+		// Log token usage for debugging
+		if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+			log.Debugf("Token Usage - Prompt: %d, Completion: %d, Total: %d",
+				response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens)
+		}
 	}
 
 	if returnOpenAIFormat {
@@ -1149,10 +1332,11 @@ func (h *OllamaHandler) processChatCompletion(c *fiber.Ctx, request *models.Open
 	} else {
 		// Convert OpenAI response to Ollama format
 		ollamaResponse := &models.OllamaChatResponse{
-			Model:     originalPrefixedModel, // Use prefixed model for Ollama format
-			CreatedAt: time.Now(),
-			Message:   models.OpenAIToOllamaMessage(response.Choices[0].Message),
-			Done:      true,
+			Model:      originalPrefixedModel, // Use prefixed model for Ollama format
+			CreatedAt:  time.Now(),
+			Message:    models.OpenAIToOllamaMessage(response.Choices[0].Message),
+			Done:       true,
+			DoneReason: response.Choices[0].FinishReason,
 		}
 
 		// Add usage information if available
@@ -1182,6 +1366,21 @@ func (h *OllamaHandler) ChatCompletions(c *fiber.Ctx) error {
 	}
 
 	log.Debugf("Request Body: %s", string(c.Body()))
+
+	// Log chat input for streaming requests
+	if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+		log.Debugf("Streaming Chat Input - Model: %s", request.Model)
+		for i, msg := range request.Messages {
+			if contentStr, ok := msg.Content.(string); ok {
+				log.Debugf("Message[%d]: Role=%s, Content=%.100s", i, msg.Role, contentStr)
+				if len(contentStr) > 100 {
+					log.Debugf("Message[%d]: Content (truncated, total length=%d)", i, len(contentStr))
+				}
+			} else {
+				log.Debugf("Message[%d]: Role=%s, Content: [non-string content]", i, msg.Role)
+			}
+		}
+	}
 
 	// Use universal processing function with OpenAI format
 	return h.processChatCompletion(c, &request, true)
@@ -1267,6 +1466,16 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 				chunkCount++
 				if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
 					log.Debugf("[%s] Received chunk %d from backend", requestID, chunkCount)
+
+					// Log streaming chunk content
+					if len(response.Choices) > 0 && response.Choices[0].Delta != nil {
+						if content, ok := response.Choices[0].Delta.Content.(string); ok && content != "" {
+							log.Debugf("[%s] Streaming Chunk - Content: %.100s", requestID, content)
+							if len(content) > 100 {
+								log.Debugf("[%s] Streaming Chunk - Content (truncated, total length=%d)", requestID, len(content))
+							}
+						}
+					}
 				}
 
 				if returnOpenAIFormat {
@@ -1312,10 +1521,19 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 					log.Debugf("[%s] Received final chunk with finish reason: %s (total chunks: %d)",
 						requestID, response.Choices[0].FinishReason, chunkCount)
 
-					// Record token usage if available in the final chunk
+					// Log token usage for streaming completion
 					if response.Usage != nil {
 						middleware.SetTokenUsage(c, response.Usage.PromptTokens,
 							response.Usage.CompletionTokens, response.Usage.TotalTokens)
+
+						if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+							log.Debugf("[%s] Streaming Token Usage - Prompt: %d, Completion: %d, Total: %d",
+								requestID, response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens)
+						}
+					}
+
+					if config.GlobalConfig != nil && config.GlobalConfig.Server.Debug {
+						log.Debugf("[%s] Streaming Chat Completed - Model: %s", requestID, request.Model)
 					}
 
 					var doneData string
@@ -1443,6 +1661,54 @@ func (h *OllamaHandler) handleStreamingChatCompletions(c *fiber.Ctx, backendClie
 	})
 
 	return nil
+}
+
+// findFallbackBackend tries to find a backend that can handle the given model
+func (h *OllamaHandler) findFallbackBackend(modelName string) string {
+	// Try each enabled backend to see if it can handle this model
+	for backendName, backendClient := range h.backendClients {
+		// Get all models from this backend
+		openaiModels, err := backendClient.GetModels()
+		if err != nil {
+			log.Debugf("Failed to get models from backend %s for fallback: %v", backendName, err)
+			continue
+		}
+
+		// Check if the model exists in this backend (with or without prefix)
+		for _, openaiModel := range openaiModels {
+			// Direct match
+			if openaiModel.ID == modelName {
+				log.Debugf("Found model '%s' in backend '%s'", modelName, backendName)
+				// Add mapping for future requests
+				h.modelCache.AddModelMapping(modelName, backendName)
+				return backendName
+			}
+
+			// Try to match with prefix logic
+			if h.converter != nil {
+				// Try to parse the model name to see if it could belong to this backend
+				parsed, err := h.converter.ParseModelName(modelName)
+				if err == nil && parsed.Backend == backendName {
+					log.Debugf("Model '%s' can be handled by backend '%s' (parsed)", modelName, backendName)
+					// Add mapping for future requests
+					h.modelCache.AddModelMapping(modelName, backendName)
+					return backendName
+				}
+			}
+		}
+	}
+
+	// If no exact match found, use the first available backend as last resort
+	if len(h.backendClients) > 0 {
+		for backendName := range h.backendClients {
+			log.Warnf("Using backend '%s' as generic fallback for model '%s'", backendName, modelName)
+			// Add mapping for future requests
+			h.modelCache.AddModelMapping(modelName, backendName)
+			return backendName
+		}
+	}
+
+	return ""
 }
 
 // Helper to validate prompt and apply default if needed

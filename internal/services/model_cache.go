@@ -88,11 +88,34 @@ func (mc *ModelCache) refreshModels() {
 	mc.cachedModels = make(map[string]models.OllamaModelInfo)
 	mc.modelMap = make(map[string]string)
 
+	// Track if we have any wildcard configuration
+	hasWildcardBackend := make(map[string]bool)
+
 	// Collect models from all enabled backends
 	for backendName, backendClient := range mc.clients {
 		openaiModels, err := backendClient.GetModels()
 		if err != nil {
 			log.Error("Failed to get models from backend %s: %v", backendName, err)
+
+			// Even if GetModels() fails, we should still provide fallback models for backends without wildcard config
+			wildcardEnabled := false
+			for _, model := range mc.config.Models {
+				if model.Enabled && model.Name == "*" && model.Backend == backendName {
+					wildcardEnabled = true
+					hasWildcardBackend[backendName] = true
+					break
+				}
+			}
+
+			// If no wildcard config and GetModels failed, create basic fallback models from config
+			if !wildcardEnabled {
+				log.Infof("Creating fallback models for backend %s from configuration", backendName)
+				fallbackModels := mc.createConfigBasedFallbackModels(backendName)
+				for _, model := range fallbackModels {
+					mc.cachedModels[model.Name] = model
+					mc.modelMap[model.Name] = backendName
+				}
+			}
 			continue
 		}
 
@@ -103,6 +126,7 @@ func (mc *ModelCache) refreshModels() {
 			if model.Enabled && model.Name == "*" && model.Backend == backendName {
 				wildcardEnabled = true
 				wildcardConfig = &model
+				hasWildcardBackend[backendName] = true
 				break
 			}
 		}
@@ -124,6 +148,11 @@ func (mc *ModelCache) refreshModels() {
 		} else {
 			// Otherwise, use the regular converter (which will only convert matching models)
 			ollamaModels = mc.converter.ConvertOpenAIModelsList(openaiModels)
+			// Always add fallback models when no wildcard configuration exists
+			// This ensures we have models available even without explicit * configuration
+			fallbackModels := mc.convertBasicOpenAIModels(openaiModels, backendName, backendConfig)
+			// Merge regular models and fallback models, avoiding duplicates
+			ollamaModels = mc.mergeModelLists(ollamaModels, fallbackModels)
 		}
 
 		// Add to cache
@@ -262,8 +291,28 @@ func (mc *ModelCache) asyncRefreshModels() {
 			log.Error("Failed to get models from backend %s: %v", backendName, err)
 			// 标记后端为不健康
 			mc.markBackendUnhealthy(backendName)
-			// 从现有缓存复制该后端的模型
-			mc.copyExistingBackendModels(backendName, newModels, newModelMap)
+
+			// Even if GetModels() fails, we should still provide fallback models for backends without wildcard config
+			wildcardEnabled := false
+			for _, model := range mc.config.Models {
+				if model.Enabled && model.Name == "*" && model.Backend == backendName {
+					wildcardEnabled = true
+					break
+				}
+			}
+
+			// If no wildcard config and GetModels failed, create basic fallback models from config
+			if !wildcardEnabled {
+				log.Infof("Creating fallback models for backend %s from configuration (async refresh)", backendName)
+				fallbackModels := mc.createConfigBasedFallbackModels(backendName)
+				for _, model := range fallbackModels {
+					newModels[model.Name] = model
+					newModelMap[model.Name] = backendName
+				}
+			} else {
+				// From existing cache copy the backend's models (only for wildcard backends)
+				mc.copyExistingBackendModels(backendName, newModels, newModelMap)
+			}
 			continue
 		}
 
@@ -347,6 +396,11 @@ func (mc *ModelCache) processBackendModels(backendName string, openaiModels []mo
 		ollamaModels = mc.convertAllOpenAIModels(openaiModels, backendName, wildcardConfig, backendConfig)
 	} else {
 		ollamaModels = mc.converter.ConvertOpenAIModelsList(openaiModels)
+		// Always add fallback models when no wildcard configuration exists
+		// This ensures we have models available even without explicit * configuration
+		fallbackModels := mc.convertBasicOpenAIModels(openaiModels, backendName, backendConfig)
+		// Merge regular models and fallback models, avoiding duplicates
+		ollamaModels = mc.mergeModelLists(ollamaModels, fallbackModels)
 	}
 
 	// 添加到新缓存
@@ -452,12 +506,58 @@ func (mc *ModelCache) GetBackendForModel(modelName string) (string, error) {
 	mc.mutex.RLock()
 	defer mc.mutex.RUnlock()
 
+	// First try exact match
 	backend, exists := mc.modelMap[modelName]
-	if !exists {
-		return "", fmt.Errorf("model not found: %s", modelName)
+	if exists {
+		return backend, nil
 	}
 
-	return backend, nil
+	// If not found, try to find a suitable backend with fallback model
+	log.Debugf("Model '%s' not found in cache, trying fallback", modelName)
+
+	// Try to match with any backend that has fallback models
+	for backendName := range mc.clients {
+		// Check if this backend has any models that could serve as fallback
+		for cachedModelName, cachedBackend := range mc.modelMap {
+			if cachedBackend != backendName {
+				continue
+			}
+
+			// Check if this is a fallback model
+			if model, exists := mc.cachedModels[cachedModelName]; exists {
+				if isFallback, ok := model.Details["fallback_model"].(bool); ok && isFallback {
+					// Extract original name from fallback model
+					if originalName, exists := model.Details["original_name"].(string); exists {
+						// Check if the requested model matches the original name (with or without prefix)
+						if modelName == originalName || modelName == cachedModelName {
+							log.Debugf("Found fallback backend '%s' for model '%s' (cached as '%s')", backendName, modelName, cachedModelName)
+							// Add mapping for future requests
+							mc.modelMap[modelName] = backendName
+							return backendName, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If still not found, try to use any available backend as last resort
+	log.Debugf("No specific fallback found for model '%s', trying any available backend", modelName)
+	for backendName := range mc.clients {
+		log.Debugf("Using backend '%s' as fallback for model '%s'", backendName, modelName)
+		// Note: We can't add mapping here because we only have read lock
+		// The mapping will be added when the model is actually requested and processed
+		return backendName, nil
+	}
+
+	return "", fmt.Errorf("model not found: %s", modelName)
+}
+
+// AddModelMapping 线程安全地添加模型映射
+func (mc *ModelCache) AddModelMapping(modelName, backendName string) {
+	mc.mutex.Lock()
+	defer mc.mutex.Unlock()
+	mc.modelMap[modelName] = backendName
 }
 
 func (mc *ModelCache) ForceRefresh() {
@@ -530,6 +630,213 @@ func (mc *ModelCache) convertAllOpenAIModels(openaiModels []models.OpenAIModel, 
 			capabilities := mc.converter.getModelCapabilities(openaiModel.ID, backendName)
 			ollamaModel.Details["capabilities"] = capabilities
 		}
+
+		ollamaModels = append(ollamaModels, ollamaModel)
+	}
+
+	return ollamaModels
+}
+
+// mergeModelLists merges two model lists, avoiding duplicates
+func (mc *ModelCache) mergeModelLists(primary, fallback []models.OllamaModelInfo) []models.OllamaModelInfo {
+	seen := make(map[string]bool)
+	var result []models.OllamaModelInfo
+
+	// Add primary models first
+	for _, model := range primary {
+		if !seen[model.Name] {
+			seen[model.Name] = true
+			result = append(result, model)
+		}
+	}
+
+	// Add fallback models that aren't already in primary
+	for _, model := range fallback {
+		if !seen[model.Name] {
+			seen[model.Name] = true
+			result = append(result, model)
+		}
+	}
+
+	return result
+}
+
+// createConfigBasedFallbackModels creates basic fallback models from configuration when GetModels() fails
+func (mc *ModelCache) createConfigBasedFallbackModels(backendName string) []models.OllamaModelInfo {
+	var fallbackModels []models.OllamaModelInfo
+
+	// Get backend configuration for prefix handling
+	var backendConfig *config.BackendConfig
+	for _, backend := range mc.config.Backends {
+		if backend.Name == backendName {
+			backendConfig = &backend
+			break
+		}
+	}
+
+	// Look for models configured for this backend in the config
+	for _, model := range mc.config.Models {
+		if !model.Enabled || model.Backend != backendName || model.Name == "*" {
+			continue
+		}
+
+		// Create a basic OpenAI model structure
+		originalName := model.OriginalName
+		if originalName == "" {
+			originalName = model.Name
+		}
+
+		// Apply prefix if configured
+		var modelName string
+		if backendConfig != nil && backendConfig.ModelPrefix != nil && backendConfig.ModelPrefix.Enabled {
+			// For manually configured models, use the configured name directly
+			// Don't apply prefix automatically since user has already specified the exact name they want
+			modelName = model.Name
+		} else {
+			modelName = model.Name
+		}
+
+		// Create basic model info
+		digest := mc.converter.GenerateModelDigest(modelName, time.Now().Unix())
+		size := int64(8589934592) // Default 8GB size
+
+		ollamaModel := models.OllamaModelInfo{
+			Name:       modelName,
+			Model:      modelName,
+			ModifiedAt: time.Now(),
+			Size:       size,
+			Digest:     digest,
+			Details: map[string]interface{}{
+				"parent_model":       "",
+				"format":             "gguf",
+				"family":             extractFamily(originalName),
+				"families":           []string{extractFamily(originalName)},
+				"parameter_size":     "unknown",
+				"quantization_level": "unknown",
+				"backend":            backendName,
+				"original_name":      originalName,
+				"fallback_model":     true,
+				"config_based":       true,
+			},
+		}
+
+		// Add capabilities from config
+		if len(model.Capabilities) > 0 {
+			ollamaModel.Details["capabilities"] = model.Capabilities
+		} else {
+			// Default capabilities
+			capabilities := []string{"completion", "chat"}
+			ollamaModel.Details["capabilities"] = capabilities
+		}
+
+		fallbackModels = append(fallbackModels, ollamaModel)
+		log.Debugf("Created config-based fallback model: %s -> %s (backend: %s)", modelName, originalName, backendName)
+	}
+
+	// If no models found in config for this backend, create a default fallback model
+	if len(fallbackModels) == 0 {
+		defaultModelName := fmt.Sprintf("%s/default-model", backendName)
+		if backendConfig != nil && backendConfig.ModelPrefix != nil && backendConfig.ModelPrefix.Enabled {
+			prefix := backendConfig.ModelPrefix.Prefix
+			if prefix == "" {
+				prefix = backendConfig.Name
+			}
+			separator := backendConfig.ModelPrefix.Separator
+			if separator == "" {
+				separator = "/"
+			}
+			defaultModelName = fmt.Sprintf("%s%sdefault-model", prefix, separator)
+		}
+
+		digest := mc.converter.GenerateModelDigest(defaultModelName, time.Now().Unix())
+
+		defaultModel := models.OllamaModelInfo{
+			Name:       defaultModelName,
+			Model:      defaultModelName,
+			ModifiedAt: time.Now(),
+			Size:       int64(8589934592), // Default 8GB
+			Digest:     digest,
+			Details: map[string]interface{}{
+				"parent_model":       "",
+				"format":             "gguf",
+				"family":             "unknown",
+				"families":           []string{"unknown"},
+				"parameter_size":     "unknown",
+				"quantization_level": "unknown",
+				"backend":            backendName,
+				"original_name":      "default-model",
+				"fallback_model":     true,
+				"config_based":       true,
+				"capabilities":       []string{"completion", "chat"},
+			},
+		}
+
+		fallbackModels = append(fallbackModels, defaultModel)
+		log.Infof("Created default fallback model for backend %s: %s", backendName, defaultModelName)
+	}
+
+	return fallbackModels
+}
+
+// convertBasicOpenAIModels converts all OpenAI models with basic info for fallback
+func (mc *ModelCache) convertBasicOpenAIModels(openaiModels []models.OpenAIModel, backendName string, backendConfig *config.BackendConfig) []models.OllamaModelInfo {
+	var ollamaModels []models.OllamaModelInfo
+
+	for _, openaiModel := range openaiModels {
+		// Apply prefix if configured
+		var modelName string
+		var originalName string
+
+		if backendConfig != nil && backendConfig.ModelPrefix != nil && backendConfig.ModelPrefix.Enabled {
+			prefix := backendConfig.ModelPrefix.Prefix
+			if prefix == "" {
+				prefix = backendConfig.Name
+			}
+			separator := backendConfig.ModelPrefix.Separator
+			if separator == "" {
+				separator = "/"
+			}
+			modelName = fmt.Sprintf("%s%s%s", prefix, separator, openaiModel.ID)
+			originalName = openaiModel.ID
+		} else {
+			modelName = openaiModel.ID
+			originalName = openaiModel.ID
+		}
+
+		// Generate SHA256 digest
+		digest := mc.converter.GenerateModelDigest(modelName, openaiModel.Created)
+
+		// Estimate model size
+		size := mc.converter.EstimateModelSize(openaiModel.ID)
+
+		// Extract parameter size
+		parameterSize := mc.converter.ExtractParameterSize(openaiModel.ID)
+
+		ollamaModel := models.OllamaModelInfo{
+			Name:       modelName,
+			Model:      modelName,
+			ModifiedAt: time.Unix(openaiModel.Created, 0),
+			Size:       size,
+			Digest:     digest,
+			Details: map[string]interface{}{
+				"parent_model":       "",
+				"format":             "gguf",
+				"family":             mc.converter.DetermineModelFamily(openaiModel.ID),
+				"families":           []string{mc.converter.DetermineModelFamily(openaiModel.ID)},
+				"parameter_size":     parameterSize,
+				"quantization_level": "unknown",
+				"backend":            backendName,
+				"original_name":      originalName,
+				"openai_object":      openaiModel.Object,
+				"openai_created":     openaiModel.Created,
+				"openai_owned_by":    openaiModel.OwnedBy,
+				"fallback_model":     true, // Mark this as a fallback model
+			},
+		}
+
+		// Add basic capabilities for fallback models
+		capabilities := []string{"completion", "chat", "embeddings"}
+		ollamaModel.Details["capabilities"] = capabilities
 
 		ollamaModels = append(ollamaModels, ollamaModel)
 	}

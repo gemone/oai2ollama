@@ -3,6 +3,8 @@ package models
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -33,11 +35,12 @@ type OpenAIThinking struct {
 }
 
 type OpenAIMessage struct {
-	Role         string              `json:"role"`
-	Content      interface{}         `json:"content"`
-	Name         *string             `json:"name,omitempty"`
-	FunctionCall *OpenAIFunctionCall `json:"function_call,omitempty"`
-	ToolCalls    []OpenAIToolCall    `json:"tool_calls,omitempty"`
+	Role             string              `json:"role"`
+	Content          interface{}         `json:"content"`
+	Name             *string             `json:"name,omitempty"`
+	FunctionCall     *OpenAIFunctionCall `json:"function_call,omitempty"`
+	ToolCalls        []OpenAIToolCall    `json:"tool_calls,omitempty"`
+	ReasoningContent *string             `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIFunction struct {
@@ -138,6 +141,7 @@ type OllamaChatResponse struct {
 	CreatedAt          time.Time     `json:"created_at"`
 	Message            OllamaMessage `json:"message"`
 	Done               bool          `json:"done"`
+	DoneReason         string        `json:"done_reason,omitempty"`
 	TotalDuration      int64         `json:"total_duration,omitempty"`
 	LoadDuration       int64         `json:"load_duration,omitempty"`
 	PromptEvalCount    int           `json:"prompt_eval_count,omitempty"`
@@ -180,6 +184,7 @@ type OllamaGenerateResponse struct {
 	CreatedAt          time.Time `json:"created_at"`
 	Response           string    `json:"response,omitempty"`
 	Done               bool      `json:"done"`
+	DoneReason         string    `json:"done_reason,omitempty"`
 	Context            []int     `json:"context,omitempty"`
 	TotalDuration      int64     `json:"total_duration,omitempty"`
 	LoadDuration       int64     `json:"load_duration,omitempty"`
@@ -276,6 +281,59 @@ func OllamaToOpenAIMessage(msg OllamaMessage) OpenAIMessage {
 		Role:    msg.Role,
 		Content: msg.Content,
 	}
+}
+
+// ProcessThinkTags extracts content between <think> and </think> tags and moves it to reasoning_content
+// Returns the processed message with think tags removed from content and reasoning_content populated
+func ProcessThinkTags(msg OpenAIMessage) OpenAIMessage {
+	// Extract content as string
+	var contentStr string
+	switch v := msg.Content.(type) {
+	case string:
+		contentStr = v
+	default:
+		// For non-string content, return as-is
+		return msg
+	}
+
+	// Compile regex to match content between <think> and </think> tags (multiline)
+	thinkRegex := regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+
+	// Find all matches of think tags
+	matches := thinkRegex.FindAllStringSubmatch(contentStr, -1)
+
+	if len(matches) == 0 {
+		// No think tags found, return as-is
+		return msg
+	}
+
+	// Extract reasoning content from all think tag matches
+	var reasoningParts []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			// Trim whitespace from the extracted content
+			reasoningContent := strings.TrimSpace(match[1])
+			if reasoningContent != "" {
+				reasoningParts = append(reasoningParts, reasoningContent)
+			}
+		}
+	}
+
+	// Remove all think tags from the original content
+	cleanContent := thinkRegex.ReplaceAllString(contentStr, "")
+	cleanContent = strings.TrimSpace(cleanContent)
+
+	// Create the processed message
+	processedMsg := msg
+	processedMsg.Content = cleanContent
+
+	if len(reasoningParts) > 0 {
+		// Join all reasoning parts with newlines
+		reasoningContent := strings.Join(reasoningParts, "\n\n")
+		processedMsg.ReasoningContent = &reasoningContent
+	}
+
+	return processedMsg
 }
 
 func OpenAIToOllamaOptions(request *OpenAIChatCompletionRequest) *OllamaGenerationOptions {
